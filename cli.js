@@ -9,21 +9,21 @@ import { execSync } from "node:child_process";
 const REPO_URL = "https://raw.githubusercontent.com/nicobailon/pi-mcp-adapter/main";
 const EXT_DIR = path.join(os.homedir(), ".pi", "agent", "extensions", "pi-mcp-adapter");
 const SETTINGS_FILE = path.join(os.homedir(), ".pi", "agent", "settings.json");
-const EXT_PATH = "~/.pi/agent/extensions/pi-mcp-adapter/index.ts";
+const EXT_PATH = "~/.pi/agent/extensions/pi-mcp-adapter/src/index.ts";
 
 const FILES = [
-  "index.ts",
-  "types.ts",
-  "config.ts",
-  "server-manager.ts",
-  "tool-registrar.ts",
-  "resource-tools.ts",
-  "lifecycle.ts",
-  "metadata-cache.ts",
-  "npx-resolver.ts",
-  "oauth-handler.ts",
-  "mcp-panel.ts",
-  "logger.ts",
+  "src/index.ts",
+  "src/types.ts",
+  "src/config.ts",
+  "src/server-manager.ts",
+  "src/tool-registrar.ts",
+  "src/resource-tools.ts",
+  "src/lifecycle.ts",
+  "src/metadata-cache.ts",
+  "src/npx-resolver.ts",
+  "src/oauth-handler.ts",
+  "src/mcp-panel.ts",
+  "src/logger.ts",
   "package.json",
   "tsconfig.json",
   "README.md",
@@ -51,7 +51,7 @@ function download(url) {
 async function main() {
   console.log("Installing pi-mcp-adapter...\n");
 
-  fs.mkdirSync(EXT_DIR, { recursive: true });
+  fs.mkdirSync(path.join(EXT_DIR, "src"), { recursive: true });
   console.log(`Created directory: ${EXT_DIR}`);
 
   for (const file of FILES) {

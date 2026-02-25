@@ -4,7 +4,7 @@
   "description": "MCP (Model Context Protocol) adapter extension for Pi coding agent",
   "type": "module",
   "license": "MIT",
-  "author": "Nico Bailon",
+  "author": "xRyul",
   "bin": {
     "pi-mcp-adapter": "./cli.js"
   },
@@ -25,24 +25,13 @@
   ],
   "pi": {
     "extensions": [
-      "./index.ts"
+      "./src/index.ts"
     ],
     "video": "https://github.com/xRyul/pi-mcp-adapter-v2/raw/refs/heads/main/pi-mcp.mp4"
   },
   "files": [
     "cli.js",
-    "index.ts",
-    "types.ts",
-    "config.ts",
-    "server-manager.ts",
-    "tool-registrar.ts",
-    "resource-tools.ts",
-    "lifecycle.ts",
-    "metadata-cache.ts",
-    "npx-resolver.ts",
-    "oauth-handler.ts",
-    "logger.ts",
-    "mcp-panel.ts",
+    "src/",
     "README.md",
     "CHANGELOG.md",
     "LICENSE"
