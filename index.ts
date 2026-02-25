@@ -1,6 +1,6 @@
 // index.ts - Full extension entry point with commands
 import { keyHint, type ExtensionAPI, type ExtensionContext, type ToolInfo } from "@mariozechner/pi-coding-agent";
-import { Text } from "@mariozechner/pi-tui";
+import { Text, type AutocompleteItem } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { existsSync } from "node:fs";
 import { loadMcpConfig, getServerProvenance, writeDirectToolsConfig } from "./config.js";
@@ -503,7 +503,56 @@ export default function mcpAdapter(pi: ExtensionAPI) {
   
   // /mcp command
   pi.registerCommand("mcp", {
-    description: "Show MCP server status",
+    description: "MCP panel + utilities (status/tools/reconnect)",
+    getArgumentCompletions: (argumentPrefix: string): AutocompleteItem[] | null => {
+      const cfg = state?.config ?? earlyConfig;
+      const serverNames = Object.keys(cfg.mcpServers ?? {});
+      const oauthServers = serverNames.filter((name) => cfg.mcpServers[name]?.auth === "oauth");
+
+      const raw = argumentPrefix ?? "";
+      const hasTrailingSpace = /\s$/.test(raw);
+      const trimmed = raw.trim();
+      const tokens = trimmed ? trimmed.split(/\s+/) : [];
+
+      const subcommands: Array<{ cmd: string; desc: string; needsArg?: boolean }> = [
+        { cmd: "status", desc: "Open MCP panel / show server status" },
+        { cmd: "tools", desc: "List all MCP tools" },
+        { cmd: "reconnect", desc: "Reconnect servers (optionally one server)", needsArg: true },
+        { cmd: "auth", desc: "OAuth setup instructions (alias of /mcp-auth)", needsArg: true },
+      ];
+
+      const makeSubcommandItem = (cmd: string, desc: string, needsArg?: boolean): AutocompleteItem => ({
+        value: cmd + (needsArg ? " " : ""),
+        label: cmd,
+        description: desc,
+      });
+
+      if (tokens.length === 0) {
+        return subcommands.map((s) => makeSubcommandItem(s.cmd, s.desc, s.needsArg));
+      }
+
+      const sub = tokens[0] ?? "";
+      if (tokens.length === 1 && !hasTrailingSpace) {
+        const items = subcommands
+          .filter((s) => s.cmd.startsWith(sub))
+          .map((s) => makeSubcommandItem(s.cmd, s.desc, s.needsArg));
+        return items.length > 0 ? items : null;
+      }
+
+      if (sub === "reconnect" || sub === "auth") {
+        const list = sub === "auth" ? oauthServers : serverNames;
+        const serverPrefix = tokens.length >= 2 ? (tokens[1] ?? "") : "";
+        const matches = list.filter((name) => name.startsWith(serverPrefix));
+        const items = matches.map((name) => ({
+          value: `${sub} ${name}`,
+          label: name,
+          description: sub === "auth" ? "OAuth server" : "MCP server",
+        }));
+        return items.length > 0 ? items : null;
+      }
+
+      return null;
+    },
     handler: async (args, ctx) => {
       // Wait for init if still in progress
       if (!state && initPromise) {
@@ -530,6 +579,14 @@ export default function mcpAdapter(pi: ExtensionAPI) {
         case "tools":
           await showTools(state, ctx);
           break;
+        case "auth":
+          if (!targetServer) {
+            if (ctx.hasUI) ctx.ui.notify("Usage: /mcp auth <server-name>", "error");
+            break;
+          }
+          await authenticateServer(targetServer, state.config, ctx);
+          break;
+
         case "status":
         case "":
         default:
@@ -546,6 +603,26 @@ export default function mcpAdapter(pi: ExtensionAPI) {
   // /mcp-auth command
   pi.registerCommand("mcp-auth", {
     description: "Authenticate with an MCP server (OAuth)",
+    getArgumentCompletions: (argumentPrefix: string): AutocompleteItem[] | null => {
+      const cfg = state?.config ?? earlyConfig;
+      const servers = Object.entries(cfg.mcpServers ?? {})
+        .filter(([, def]) => def.auth === "oauth")
+        .map(([name]) => name);
+
+      if (servers.length === 0) return null;
+
+      const raw = (argumentPrefix ?? "").trim();
+      if (raw.includes(" ")) return null;
+
+      const matches = raw ? servers.filter((s) => s.startsWith(raw)) : servers;
+      const items = matches.map((s) => ({
+        value: s,
+        label: s,
+        description: "OAuth server",
+      }));
+
+      return items.length > 0 ? items : null;
+    },
     handler: async (args, ctx) => {
       const serverName = args?.trim();
       if (!serverName) {
