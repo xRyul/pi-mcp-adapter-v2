@@ -99,6 +99,11 @@ function fgLines(theme: any, color: string, text: string): string {
   return text.split("\n").map(line => theme.fg(color, line)).join("\n");
 }
 
+function isSequentialThinkingToolName(name: unknown): boolean {
+  if (typeof name !== "string") return false;
+  return name === "sequentialthinking" || name === "sequential_thinking";
+}
+
 const BUILTIN_NAMES = new Set(["read", "bash", "edit", "write", "grep", "find", "ls", "mcp"]);
 
 function getConfigPathFromArgv(): string | undefined {
@@ -286,7 +291,7 @@ export default function mcpAdapter(pi: ExtensionAPI) {
       label: `MCP: ${spec.originalName}`,
       description: spec.description || "(no description)",
       parameters: Type.Unsafe<Record<string, unknown>>(spec.inputSchema || { type: "object", properties: {} }),
-      ...(spec.originalName === "sequential_thinking"
+      ...(isSequentialThinkingToolName(spec.originalName)
         ? {
             renderResult(result: any, { expanded, isPartial }: { expanded: boolean; isPartial: boolean }, theme: any) {
               if (isPartial) {
@@ -578,7 +583,7 @@ export default function mcpAdapter(pi: ExtensionAPI) {
         if (server) sections.push(theme.fg("muted", "Server: ") + theme.fg("accent", server));
         if (tool) sections.push(theme.fg("muted", "Tool: ") + theme.fg("accent", tool));
 
-        if (tool === "sequential_thinking" && reqArgs && typeof reqArgs.thought === "string") {
+        if (isSequentialThinkingToolName(tool) && reqArgs && typeof reqArgs.thought === "string") {
           const thoughtNum = reqArgs.thoughtNumber ?? "?";
           const totalThoughts = reqArgs.totalThoughts ?? "?";
           const contextBits: string[] = [];
@@ -592,7 +597,7 @@ export default function mcpAdapter(pi: ExtensionAPI) {
         }
 
         if (reqArgs && typeof reqArgs === "object") {
-          const argsForJson = (tool === "sequential_thinking" && typeof reqArgs.thought === "string")
+          const argsForJson = (isSequentialThinkingToolName(tool) && typeof reqArgs.thought === "string")
             ? { ...reqArgs, thought: undefined }
             : reqArgs;
           sections.push(theme.fg("muted", "Arguments:"));
@@ -620,7 +625,7 @@ export default function mcpAdapter(pi: ExtensionAPI) {
       const { text: truncated, remaining } = truncateTextLines(outputText, 12);
       let text = fgLines(theme, "toolOutput", truncated);
 
-      const isSequentialThinking = details.tool === "sequential_thinking" || details.mcpRequest?.name === "sequential_thinking";
+      const isSequentialThinking = isSequentialThinkingToolName(details.tool) || isSequentialThinkingToolName(details.mcpRequest?.name);
       if (remaining > 0) {
         text += "\n" + theme.fg("muted", `... (${remaining} more lines, `) + keyHint("expandTools", "to expand") + theme.fg("muted", ")");
       } else if (mode === "call" && isSequentialThinking) {
