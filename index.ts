@@ -1913,7 +1913,8 @@ async function authenticateServer(
     `     "access_token": "your-token-here",\n` +
     `     "token_type": "bearer"\n` +
     `   }\n\n` +
-    `4. Run /mcp reconnect to connect with the token`,
+    `4. Open /mcp, select the server and press ctrl+r to connect (or run /mcp reconnect)\n\n` +
+    `Tip: /mcp → ctrl+a → t lets you paste the token directly in the panel`,
     "info"
   );
 }
