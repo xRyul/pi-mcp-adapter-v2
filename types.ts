@@ -123,7 +123,10 @@ export interface McpPanelCallbacks {
 }
 
 export interface McpPanelResult {
-  changes: Map<string, true | string[] | false>;
+  // Per-server directTools filter changes (true | string[] | false)
+  directToolChanges: Map<string, true | string[] | false>;
+  // Server CRUD changes: ServerEntry to add/update, null to delete
+  serverChanges: Map<string, ServerEntry | null>;
   cancelled: boolean;
 }
 

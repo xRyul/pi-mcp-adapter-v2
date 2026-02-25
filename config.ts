@@ -225,3 +225,42 @@ export function writeDirectToolsConfig(
     renameSync(tmpPath, filePath);
   }
 }
+
+export function writeServerConfigChanges(
+  changes: Map<string, ServerEntry | null>,
+  overridePath?: string,
+): void {
+  const filePath = overridePath ? resolve(overridePath) : DEFAULT_CONFIG_PATH;
+
+  let raw: Record<string, unknown> = {};
+  if (existsSync(filePath)) {
+    try {
+      raw = JSON.parse(readFileSync(filePath, "utf-8"));
+    } catch {
+      raw = {};
+    }
+  }
+  if (!raw || typeof raw !== "object") raw = {};
+
+  // Preserve mcpServers vs mcp-servers key style
+  let servers = (raw.mcpServers ?? raw["mcp-servers"] ?? {}) as Record<string, ServerEntry>;
+  if (!servers || typeof servers !== "object" || Array.isArray(servers)) {
+    servers = {};
+  }
+
+  for (const [name, def] of changes) {
+    if (def === null) {
+      delete servers[name];
+    } else {
+      servers[name] = def;
+    }
+  }
+
+  const key = raw["mcp-servers"] && !raw.mcpServers ? "mcp-servers" : "mcpServers";
+  raw[key] = servers;
+
+  mkdirSync(dirname(filePath), { recursive: true });
+  const tmpPath = `${filePath}.${process.pid}.tmp`;
+  writeFileSync(tmpPath, JSON.stringify(raw, null, 2) + "\n", "utf-8");
+  renameSync(tmpPath, filePath);
+}

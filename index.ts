@@ -3,7 +3,7 @@ import { keyHint, type ExtensionAPI, type ExtensionContext, type ToolInfo } from
 import { Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { existsSync } from "node:fs";
-import { loadMcpConfig, getServerProvenance, writeDirectToolsConfig } from "./config.js";
+import { loadMcpConfig, getServerProvenance, writeDirectToolsConfig, writeServerConfigChanges } from "./config.js";
 import { formatToolName, getServerPrefix, type McpConfig, type McpContent, type ToolMetadata, type McpTool, type McpResource, type ServerEntry, type DirectToolSpec, type McpPanelCallbacks, type McpPanelResult } from "./types.js";
 import { McpServerManager } from "./server-manager.js";
 import { McpLifecycleManager } from "./lifecycle.js";
@@ -1714,6 +1714,53 @@ async function hardReconnectServer(state: McpExtensionState, serverName: string)
   }
 }
 
+async function applyServerChangesToRuntime(
+  state: McpExtensionState,
+  changes: Map<string, ServerEntry | null>,
+): Promise<void> {
+  const cache = loadMetadataCache();
+  const prefix = state.config.settings?.toolPrefix ?? "server";
+
+  for (const [serverName, definition] of changes) {
+    // Stop health checks / idle tracking from touching the server after it's removed/changed
+    state.lifecycle.unregisterServer(serverName);
+
+    // Close any existing connection so future connects use the updated definition
+    await state.manager.close(serverName).catch(() => {});
+    state.failureTracker.delete(serverName);
+    state.toolMetadata.delete(serverName);
+
+    if (definition === null) {
+      continue;
+    }
+
+    const lifecycleMode = definition.lifecycle ?? "lazy";
+    const idleOverride = definition.idleTimeout ?? (lifecycleMode === "eager" ? 0 : undefined);
+    state.lifecycle.registerServer(
+      serverName,
+      definition,
+      idleOverride !== undefined ? { idleTimeout: idleOverride } : undefined,
+    );
+    if (lifecycleMode === "keep-alive") {
+      state.lifecycle.markKeepAlive(serverName, definition);
+    }
+
+    // Hydrate from cache if valid so search/list work without connecting
+    const entry = cache?.servers?.[serverName];
+    if (entry && isServerCacheValid(entry, definition)) {
+      const metadata = reconstructToolMetadata(serverName, entry, prefix, definition.exposeResources);
+      state.toolMetadata.set(serverName, metadata);
+    }
+
+    // Best-effort immediate connect for eager / keep-alive servers
+    if (lifecycleMode === "eager" || lifecycleMode === "keep-alive") {
+      void executeConnect(state, serverName);
+    }
+  }
+
+  updateStatusBar(state);
+}
+
 
 async function openMcpPanel(
   state: McpExtensionState,
@@ -1751,9 +1798,30 @@ async function openMcpPanel(
     ctx.ui.custom(
       (tui, _theme, _keybindings, done) => {
         return createMcpPanel(config, cache, provenanceMap, callbacks, tui, (result: McpPanelResult) => {
-          if (!result.cancelled && result.changes.size > 0) {
-            writeDirectToolsConfig(result.changes, provenanceMap, config);
-            ctx.ui.notify("Direct tools updated. Restart pi to apply.", "info");
+          if (!result.cancelled) {
+            const configPath = (pi.getFlag("mcp-config") as string | undefined) ?? configOverridePath;
+
+            if (result.serverChanges.size > 0) {
+              // Apply to in-memory config immediately so subsequent operations see updated definitions
+              for (const [name, def] of result.serverChanges) {
+                if (def === null) delete config.mcpServers[name];
+                else config.mcpServers[name] = def;
+              }
+
+              writeServerConfigChanges(result.serverChanges, configPath);
+
+              // Hot-apply: update runtime state so new/updated servers are immediately usable via mcp({ ... })
+              void applyServerChangesToRuntime(state, result.serverChanges).catch((err) => {
+                logError("MCP: failed to hot-apply server changes", err);
+              });
+
+              ctx.ui.notify("MCP servers updated.", "info");
+            }
+
+            if (result.directToolChanges.size > 0) {
+              writeDirectToolsConfig(result.directToolChanges, provenanceMap, config);
+              ctx.ui.notify("Direct tools updated. Restart pi to apply.", "info");
+            }
           }
           done();
           resolve();

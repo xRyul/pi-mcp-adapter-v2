@@ -38,6 +38,12 @@ export class McpLifecycleManager {
     }
   }
 
+  unregisterServer(name: string): void {
+    this.keepAliveServers.delete(name);
+    this.allServers.delete(name);
+    this.serverSettings.delete(name);
+  }
+
   setGlobalIdleTimeout(minutes: number): void {
     this.globalIdleTimeout = minutes * 60 * 1000;
   }

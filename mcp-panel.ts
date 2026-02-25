@@ -1,9 +1,9 @@
-import { matchesKey, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
+import { matchesKey, truncateToWidth, visibleWidth, Editor, type EditorTheme, type TUI } from "@mariozechner/pi-tui";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
-import type { McpConfig, McpPanelCallbacks, McpPanelResult, ServerProvenance } from "./types.js";
+import type { McpConfig, McpPanelCallbacks, McpPanelResult, ServerEntry, ServerProvenance } from "./types.js";
 import { resourceNameToToolName } from "./resource-tools.js";
 import type { MetadataCache, ServerCacheEntry, CachedTool } from "./metadata-cache.js";
 
@@ -112,6 +112,7 @@ class McpPanel {
   private servers: ServerState[] = [];
   private cursorIndex = 0;
   private nameQuery = "";
+  private nameSearchActive = false;
   private descSearchActive = false;
   private descQuery = "";
   private dirty = false;
@@ -120,8 +121,25 @@ class McpPanel {
   private importNotice: string | null = null;
   private panelMessage: { kind: "info" | "error"; text: string } | null = null;
 
+  // Server CRUD (add/edit/delete) staged changes. Applied on ctrl+s save.
+  private serverChanges = new Map<string, ServerEntry | null>();
+  private confirmingDelete = false;
+  private deleteSelected = 1;
+  private deleteServerIndex: number | null = null;
+
+  // Server JSON editor view (multiline)
+  private serverEditor: Editor | null = null;
+  private serverEditorMode: "add" | "edit" = "add";
+  private serverEditorTarget: string | null = null;
+  private serverEditorInitialText = "";
+  private serverEditorMessage: { kind: "info" | "error"; text: string } | null = null;
+  private serverEditorInPaste = false;
+  private serverEditorPasteBuffer = "";
+  private confirmingEditorDiscard = false;
+  private editorDiscardSelected = 1;
+
   // OAuth setup view (for servers with auth: "oauth")
-  private view: "main" | "auth" = "main";
+  private view: "main" | "auth" | "server-editor" = "main";
   private authServerIndex: number | null = null;
   private authEnteringToken = false;
   private authTokenInput = "";
@@ -130,7 +148,7 @@ class McpPanel {
 
   private inactivityTimeout: ReturnType<typeof setTimeout> | null = null;
   private visibleItems: VisibleItem[] = [];
-  private tui: { requestRender(): void };
+  private tui: TUI;
   private t = DEFAULT_THEME;
 
   private static readonly MAX_VISIBLE = 12;
@@ -141,7 +159,7 @@ class McpPanel {
     cache: MetadataCache | null,
     provenance: Map<string, ServerProvenance>,
     private callbacks: McpPanelCallbacks,
-    tui: { requestRender(): void },
+    tui: TUI,
     private done: (result: McpPanelResult) => void,
   ) {
     this.tui = tui;
@@ -207,7 +225,7 @@ class McpPanel {
     if (this.inactivityTimeout) clearTimeout(this.inactivityTimeout);
     this.inactivityTimeout = setTimeout(() => {
       this.cleanup();
-      this.done({ cancelled: true, changes: new Map() });
+      this.done({ cancelled: true, directToolChanges: new Map(), serverChanges: new Map() });
     }, McpPanel.INACTIVITY_MS);
   }
 
@@ -256,24 +274,30 @@ class McpPanel {
   }
 
   private updateDirty(): void {
-    this.dirty = this.servers.some((s) => s.tools.some((t) => t.isDirect !== t.wasDirect));
+    const directDirty = this.servers.some((s) => s.tools.some((t) => t.isDirect !== t.wasDirect));
+    const serverDirty = this.serverChanges.size > 0;
+    this.dirty = directDirty || serverDirty;
   }
 
   private buildResult(): McpPanelResult {
-    const changes = new Map<string, true | string[] | false>();
+    const directToolChanges = new Map<string, true | string[] | false>();
     for (const server of this.servers) {
       const changed = server.tools.some((t) => t.isDirect !== t.wasDirect);
       if (!changed) continue;
       const directTools = server.tools.filter((t) => t.isDirect);
       if (directTools.length === server.tools.length && server.tools.length > 0) {
-        changes.set(server.name, true);
+        directToolChanges.set(server.name, true);
       } else if (directTools.length === 0) {
-        changes.set(server.name, false);
+        directToolChanges.set(server.name, false);
       } else {
-        changes.set(server.name, directTools.map((t) => t.name));
+        directToolChanges.set(server.name, directTools.map((t) => t.name));
       }
     }
-    return { changes, cancelled: false };
+    return {
+      directToolChanges,
+      serverChanges: new Map(this.serverChanges),
+      cancelled: false,
+    };
   }
 
   handleInput(data: string): void {
@@ -285,16 +309,37 @@ class McpPanel {
       return;
     }
 
+    if (this.confirmingDelete) {
+      this.handleDeleteConfirmInput(data);
+      return;
+    }
+
+    if (this.confirmingEditorDiscard) {
+      this.handleEditorDiscardInput(data);
+      return;
+    }
+
     // Global shortcuts — always work, even during auth/token entry
     if (matchesKey(data, "ctrl+c")) {
       this.cleanup();
-      this.done({ cancelled: true, changes: new Map() });
+      this.done({ cancelled: true, directToolChanges: new Map(), serverChanges: new Map() });
       return;
     }
 
     if (matchesKey(data, "ctrl+s")) {
+      // If we're in the server JSON editor, try to apply changes first so they're included in the save.
+      if (this.view === "server-editor") {
+        const ok = this.applyServerEditorAndClose();
+        if (!ok) return;
+      }
       this.cleanup();
       this.done(this.buildResult());
+      return;
+    }
+
+    // Server JSON editor view
+    if (this.view === "server-editor") {
+      this.handleServerEditorInput(data);
       return;
     }
 
@@ -343,6 +388,79 @@ class McpPanel {
       return;
     }
 
+    // Name search mode (press / to enter)
+    if (this.nameSearchActive) {
+      if (matchesKey(data, "escape")) {
+        this.nameSearchActive = false;
+        this.nameQuery = "";
+        this.rebuildVisibleItems();
+        this.cursorIndex = Math.min(this.cursorIndex, Math.max(0, this.visibleItems.length - 1));
+        return;
+      }
+      if (matchesKey(data, "return")) {
+        // Lock query and return to normal navigation
+        this.nameSearchActive = false;
+        this.rebuildVisibleItems();
+        this.cursorIndex = Math.min(this.cursorIndex, Math.max(0, this.visibleItems.length - 1));
+        return;
+      }
+      if (matchesKey(data, "backspace")) {
+        if (this.nameQuery.length > 0) {
+          this.nameQuery = this.nameQuery.slice(0, -1);
+          this.rebuildVisibleItems();
+          this.cursorIndex = Math.min(this.cursorIndex, Math.max(0, this.visibleItems.length - 1));
+        }
+        return;
+      }
+      if (matchesKey(data, "up")) { this.moveCursor(-1); return; }
+      if (matchesKey(data, "down")) { this.moveCursor(1); return; }
+      if (matchesKey(data, "space")) {
+        const item = this.visibleItems[this.cursorIndex];
+        if (item) this.toggleItem(item);
+        return;
+      }
+      if (data.length === 1 && data.charCodeAt(0) >= 32) {
+        this.nameQuery += data;
+        this.rebuildVisibleItems();
+        this.cursorIndex = Math.min(this.cursorIndex, Math.max(0, this.visibleItems.length - 1));
+        return;
+      }
+      return;
+    }
+
+    // Enter name search
+    if (data === "/") {
+      this.nameSearchActive = true;
+      this.tui.requestRender();
+      return;
+    }
+
+    // Add / Edit / Delete server
+    if (data === "n" || data === "N") {
+      this.openServerEditorAdd();
+      return;
+    }
+    if (data === "e" || data === "E") {
+      const item = this.visibleItems[this.cursorIndex];
+      if (!item) {
+        this.panelMessage = { kind: "error", text: "No server selected." };
+        this.tui.requestRender();
+        return;
+      }
+      this.openServerEditorEdit(item.serverIndex);
+      return;
+    }
+    if (data === "d" || data === "D" || matchesKey(data, "delete")) {
+      const item = this.visibleItems[this.cursorIndex];
+      if (!item) {
+        this.panelMessage = { kind: "error", text: "No server selected." };
+        this.tui.requestRender();
+        return;
+      }
+      this.openDeleteConfirm(item.serverIndex);
+      return;
+    }
+
     // Reconnect all servers
     if (matchesKey(data, "ctrl+alt+r")) {
       this.reconnectAll();
@@ -363,6 +481,7 @@ class McpPanel {
     }
 
     if (matchesKey(data, "escape")) {
+      // Clear locked name query first
       if (this.nameQuery) {
         this.nameQuery = "";
         this.rebuildVisibleItems();
@@ -375,7 +494,7 @@ class McpPanel {
         return;
       }
       this.cleanup();
-      this.done({ cancelled: true, changes: new Map() });
+      this.done({ cancelled: true, directToolChanges: new Map(), serverChanges: new Map() });
       return;
     }
 
@@ -423,7 +542,7 @@ class McpPanel {
       return;
     }
 
-    // Backspace removes from name query
+    // Backspace edits locked name query
     if (matchesKey(data, "backspace")) {
       if (this.nameQuery.length > 0) {
         this.nameQuery = this.nameQuery.slice(0, -1);
@@ -432,12 +551,427 @@ class McpPanel {
       }
       return;
     }
+  }
 
-    // All other printable chars → always-on name search
-    if (data.length === 1 && data.charCodeAt(0) >= 32) {
-      this.nameQuery += data;
-      this.rebuildVisibleItems();
-      this.cursorIndex = Math.min(this.cursorIndex, Math.max(0, this.visibleItems.length - 1));
+  private createServerEditorTheme(): EditorTheme {
+    const t = this.t;
+    return {
+      borderColor: (s: string) => fg(t.border, s),
+      selectList: {
+        selectedPrefix: (s: string) => fg(t.selected, s),
+        selectedText: (s: string) => fg(t.selected, s),
+        description: (s: string) => fg(t.description, s),
+        scrollInfo: (s: string) => fg(t.description, s),
+        noMatch: (s: string) => fg(t.description, s),
+      },
+    };
+  }
+
+  private openServerEditorAdd(): void {
+    this.serverEditorMode = "add";
+    this.serverEditorTarget = null;
+    this.serverEditorMessage = null;
+    this.serverEditorInPaste = false;
+    this.serverEditorPasteBuffer = "";
+    this.confirmingEditorDiscard = false;
+    this.editorDiscardSelected = 1;
+    this.confirmingDelete = false;
+
+    const template = JSON.stringify(
+      {
+        mcpServers: {
+          "my-server": {
+            command: "npx",
+            args: ["-y", "some-mcp-server@latest"],
+          },
+        },
+      },
+      null,
+      2,
+    );
+
+    const editor = new Editor(this.tui, this.createServerEditorTheme(), { paddingX: 0 });
+    editor.disableSubmit = true;
+    editor.setText(template);
+    this.serverEditor = editor;
+    this.serverEditorInitialText = template;
+    this.view = "server-editor";
+    this.tui.requestRender();
+  }
+
+  private openServerEditorEdit(serverIndex: number): void {
+    const server = this.servers[serverIndex];
+    if (!server) {
+      this.panelMessage = { kind: "error", text: "No server selected." };
+      this.tui.requestRender();
+      return;
+    }
+
+    if (server.source === "project") {
+      this.panelMessage = { kind: "error", text: "Editing project MCP servers is not supported yet (global-only)." };
+      this.tui.requestRender();
+      return;
+    }
+
+    const staged = this.serverChanges.get(server.name);
+    const definition = staged === undefined ? this.config.mcpServers?.[server.name] : staged;
+    if (!definition) {
+      this.panelMessage = { kind: "error", text: `Server \"${server.name}\" not found in config.` };
+      this.tui.requestRender();
+      return;
+    }
+
+    this.serverEditorMode = "edit";
+    this.serverEditorTarget = server.name;
+    this.serverEditorInPaste = false;
+    this.serverEditorPasteBuffer = "";
+    this.confirmingEditorDiscard = false;
+    this.editorDiscardSelected = 1;
+    this.confirmingDelete = false;
+
+    this.serverEditorMessage =
+      server.source === "import"
+        ? { kind: "info", text: `Imported from ${server.importKind ?? "external"} — will copy to user config on save.` }
+        : null;
+
+    const template = JSON.stringify(definition, null, 2);
+
+    const editor = new Editor(this.tui, this.createServerEditorTheme(), { paddingX: 0 });
+    editor.disableSubmit = true;
+    editor.setText(template);
+    this.serverEditor = editor;
+    this.serverEditorInitialText = template;
+    this.view = "server-editor";
+    this.tui.requestRender();
+  }
+
+  private closeServerEditor(): void {
+    this.view = "main";
+    this.serverEditor = null;
+    this.serverEditorTarget = null;
+    this.serverEditorInitialText = "";
+    this.serverEditorMessage = null;
+    this.serverEditorInPaste = false;
+    this.serverEditorPasteBuffer = "";
+    this.confirmingEditorDiscard = false;
+    this.editorDiscardSelected = 1;
+    this.tui.requestRender();
+  }
+
+  private handleServerEditorInput(data: string): void {
+    const editor = this.serverEditor;
+    if (!editor) {
+      // Shouldn't happen, but don't crash the panel
+      if (matchesKey(data, "escape")) this.view = "main";
+      return;
+    }
+
+    // Esc: go back (with confirm if dirty)
+    if (matchesKey(data, "escape")) {
+      const isDirty = editor.getText() !== this.serverEditorInitialText;
+      if (isDirty) {
+        this.confirmingEditorDiscard = true;
+        this.editorDiscardSelected = 1;
+      } else {
+        this.closeServerEditor();
+      }
+      return;
+    }
+
+    // Enter: apply (we keep submit disabled so Editor doesn't clear the buffer)
+    if (matchesKey(data, "return")) {
+      this.applyServerEditorAndClose();
+      return;
+    }
+
+    // Handle bracketed paste mode ourselves so large pastes don't get collapsed into [paste #...] markers
+    if (data.includes("\x1b[200~")) {
+      this.serverEditorInPaste = true;
+      this.serverEditorPasteBuffer = "";
+      data = data.replace("\x1b[200~", "");
+    }
+    if (this.serverEditorInPaste) {
+      this.serverEditorPasteBuffer += data;
+      const endIndex = this.serverEditorPasteBuffer.indexOf("\x1b[201~");
+      if (endIndex !== -1) {
+        const pasteContent = this.serverEditorPasteBuffer.substring(0, endIndex);
+        if (pasteContent.length > 0) {
+          editor.insertTextAtCursor(pasteContent);
+        }
+        this.serverEditorInPaste = false;
+        const remaining = this.serverEditorPasteBuffer.substring(endIndex + 6);
+        this.serverEditorPasteBuffer = "";
+        if (remaining.length > 0) {
+          this.handleServerEditorInput(remaining);
+        }
+      }
+      this.tui.requestRender();
+      return;
+    }
+
+    editor.handleInput(data);
+  }
+
+  private handleEditorDiscardInput(data: string): void {
+    if (matchesKey(data, "ctrl+c")) {
+      this.cleanup();
+      this.done({ cancelled: true, directToolChanges: new Map(), serverChanges: new Map() });
+      return;
+    }
+    if (matchesKey(data, "escape") || data === "n" || data === "N") {
+      this.confirmingEditorDiscard = false;
+      return;
+    }
+    if (matchesKey(data, "left") || matchesKey(data, "right") || matchesKey(data, "tab")) {
+      this.editorDiscardSelected = this.editorDiscardSelected === 0 ? 1 : 0;
+      return;
+    }
+    if (matchesKey(data, "return")) {
+      if (this.editorDiscardSelected === 0) {
+        // Discard editor buffer and return to main view
+        this.closeServerEditor();
+      } else {
+        // Keep editing
+        this.confirmingEditorDiscard = false;
+      }
+      return;
+    }
+    if (data === "y" || data === "Y") {
+      this.closeServerEditor();
+      return;
+    }
+  }
+
+  private parseServersJson(text: string): { servers: Record<string, ServerEntry> } | { error: string } {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch (e) {
+      return { error: `Invalid JSON: ${e instanceof Error ? e.message : String(e)}` };
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return { error: "Expected a JSON object." };
+    }
+    const root = parsed as Record<string, unknown>;
+
+    const serversRaw = (root.mcpServers ?? root["mcp-servers"] ?? root) as unknown;
+    if (!serversRaw || typeof serversRaw !== "object" || Array.isArray(serversRaw)) {
+      return { error: "Expected an object of servers (e.g. {\"mcpServers\": { \"name\": { ... } } })." };
+    }
+
+    // If the user pasted only a single ServerEntry object, prompt them to include the server name key.
+    const maybeEntry = serversRaw as Record<string, unknown>;
+    if (typeof maybeEntry.command === "string" || typeof maybeEntry.url === "string") {
+      return { error: "Missing server name. Wrap it like {\"mcpServers\": { \"my-server\": { ... } } }." };
+    }
+
+    const servers: Record<string, ServerEntry> = {};
+    for (const [name, def] of Object.entries(serversRaw as Record<string, unknown>)) {
+      if (!name || typeof name !== "string") {
+        return { error: "Server name must be a string." };
+      }
+      if (!def || typeof def !== "object" || Array.isArray(def)) {
+        return { error: `Server \"${name}\" must be an object.` };
+      }
+      const entry = def as ServerEntry;
+      if (entry.command && entry.url) {
+        return { error: `Server \"${name}\" must have either \"command\" or \"url\", not both.` };
+      }
+      if (!entry.command && !entry.url) {
+        return { error: `Server \"${name}\" must have either \"command\" (stdio) or \"url\" (HTTP).` };
+      }
+      servers[name] = entry;
+    }
+
+    if (Object.keys(servers).length === 0) {
+      return { error: "No servers found." };
+    }
+    return { servers };
+  }
+
+  private applyServerEditorAndClose(): boolean {
+    const editor = this.serverEditor;
+    if (!editor) return true;
+
+    const text = editor.getText();
+
+    // Edit mode supports two formats:
+    // 1) Raw ServerEntry JSON (most convenient)
+    // 2) Wrapper JSON containing mcpServers / mcp-servers
+    if (this.serverEditorMode === "edit") {
+      const target = this.serverEditorTarget;
+      if (!target) {
+        this.serverEditorMessage = { kind: "error", text: "No edit target server." };
+        this.tui.requestRender();
+        return false;
+      }
+
+      let root: unknown;
+      try {
+        root = JSON.parse(text);
+      } catch (e) {
+        this.serverEditorMessage = { kind: "error", text: `Invalid JSON: ${e instanceof Error ? e.message : String(e)}` };
+        this.tui.requestRender();
+        return false;
+      }
+
+      if (root && typeof root === "object" && !Array.isArray(root)) {
+        const obj = root as Record<string, unknown>;
+        const hasWrapper = typeof obj.mcpServers === "object" || typeof obj["mcp-servers"] === "object";
+        const looksLikeEntry = typeof (obj as Record<string, unknown>).command === "string" || typeof (obj as Record<string, unknown>).url === "string";
+        if (!hasWrapper && looksLikeEntry) {
+          const entry = root as ServerEntry;
+          if (entry.command && entry.url) {
+            this.serverEditorMessage = { kind: "error", text: "Server entry must have either \"command\" or \"url\", not both." };
+            this.tui.requestRender();
+            return false;
+          }
+          if (!entry.command && !entry.url) {
+            this.serverEditorMessage = { kind: "error", text: "Server entry must have either \"command\" (stdio) or \"url\" (HTTP)." };
+            this.tui.requestRender();
+            return false;
+          }
+          this.serverChanges.set(target, entry);
+          this.updateDirty();
+          this.panelMessage = { kind: "info", text: `Staged ${target}. Press ctrl+s to save.` };
+          this.serverEditorMessage = null;
+          this.closeServerEditor();
+          return true;
+        }
+      }
+      // Otherwise fall through to wrapper parsing below.
+    }
+
+    const parsed = this.parseServersJson(text);
+    if ("error" in parsed) {
+      this.serverEditorMessage = { kind: "error", text: parsed.error };
+      this.tui.requestRender();
+      return false;
+    }
+
+    const servers = parsed.servers;
+    const names = Object.keys(servers);
+
+    if (this.serverEditorMode === "edit") {
+      const target = this.serverEditorTarget;
+      if (!target) {
+        this.serverEditorMessage = { kind: "error", text: "No edit target server." };
+        this.tui.requestRender();
+        return false;
+      }
+      if (names.length !== 1 || names[0] !== target) {
+        this.serverEditorMessage = {
+          kind: "error",
+          text: `Edit mode expects exactly one server named \"${target}\".`,
+        };
+        this.tui.requestRender();
+        return false;
+      }
+    }
+
+    // Stage changes and update list UI
+    for (const [name, def] of Object.entries(servers)) {
+      const existing = this.servers.find((s) => s.name === name);
+      if (!existing) {
+        this.servers.push({
+          name,
+          expanded: false,
+          source: "user",
+          connectionStatus: "idle",
+          tools: [],
+          hasCachedData: false,
+        });
+      }
+      this.serverChanges.set(name, def);
+    }
+
+    this.updateDirty();
+    this.rebuildVisibleItems();
+    this.cursorIndex = Math.min(this.cursorIndex, Math.max(0, this.visibleItems.length - 1));
+
+    const suffix = names.length === 1 ? "server" : "servers";
+    this.panelMessage = { kind: "info", text: `Staged ${names.length} ${suffix}. Press ctrl+s to save.` };
+    this.serverEditorMessage = null;
+    this.closeServerEditor();
+    return true;
+  }
+
+  private openDeleteConfirm(serverIndex: number): void {
+    const server = this.servers[serverIndex];
+    if (!server) {
+      this.panelMessage = { kind: "error", text: "No server selected." };
+      this.tui.requestRender();
+      return;
+    }
+    if (server.source !== "user") {
+      this.panelMessage = { kind: "error", text: `Delete not supported for ${server.source} servers yet.` };
+      this.tui.requestRender();
+      return;
+    }
+
+    this.confirmingDelete = true;
+    this.deleteServerIndex = serverIndex;
+    this.deleteSelected = 1;
+    this.tui.requestRender();
+  }
+
+  private handleDeleteConfirmInput(data: string): void {
+    if (matchesKey(data, "ctrl+c")) {
+      this.cleanup();
+      this.done({ cancelled: true, directToolChanges: new Map(), serverChanges: new Map() });
+      return;
+    }
+    if (matchesKey(data, "escape") || data === "n" || data === "N") {
+      this.confirmingDelete = false;
+      return;
+    }
+    if (matchesKey(data, "left") || matchesKey(data, "right") || matchesKey(data, "tab")) {
+      this.deleteSelected = this.deleteSelected === 0 ? 1 : 0;
+      return;
+    }
+    if (matchesKey(data, "return")) {
+      if (this.deleteSelected === 0) {
+        const idx = this.deleteServerIndex;
+        const server = typeof idx === "number" ? this.servers[idx] : undefined;
+        if (server) {
+          const name = server.name;
+          // If it was newly added in this session, just drop it
+          if (!this.config.mcpServers?.[name] && this.serverChanges.has(name)) {
+            this.serverChanges.delete(name);
+          } else {
+            this.serverChanges.set(name, null);
+          }
+          this.servers = this.servers.filter((s) => s.name !== name);
+          this.rebuildVisibleItems();
+          this.cursorIndex = Math.min(this.cursorIndex, Math.max(0, this.visibleItems.length - 1));
+          this.updateDirty();
+          this.panelMessage = { kind: "info", text: `Deleted ${name} (staged). Press ctrl+s to save.` };
+        }
+      }
+      this.confirmingDelete = false;
+      this.deleteServerIndex = null;
+      return;
+    }
+    if (data === "y" || data === "Y") {
+      // Confirm delete via single-key shortcut
+      this.deleteSelected = 0;
+      const idx = this.deleteServerIndex;
+      const server = typeof idx === "number" ? this.servers[idx] : undefined;
+      if (server) {
+        const name = server.name;
+        if (!this.config.mcpServers?.[name] && this.serverChanges.has(name)) {
+          this.serverChanges.delete(name);
+        } else {
+          this.serverChanges.set(name, null);
+        }
+        this.servers = this.servers.filter((s) => s.name !== name);
+        this.rebuildVisibleItems();
+        this.cursorIndex = Math.min(this.cursorIndex, Math.max(0, this.visibleItems.length - 1));
+        this.updateDirty();
+        this.panelMessage = { kind: "info", text: `Deleted ${name} (staged). Press ctrl+s to save.` };
+      }
+      this.confirmingDelete = false;
+      this.deleteServerIndex = null;
       return;
     }
   }
@@ -614,6 +1148,15 @@ class McpPanel {
   private async reconnectServer(server: ServerState): Promise<void> {
     if (server.connectionStatus === "connecting") return;
 
+    if (this.serverChanges.has(server.name)) {
+      this.panelMessage = {
+        kind: "error",
+        text: `Server "${server.name}" has unsaved config changes. Press ctrl+s to save, then reconnect.`,
+      };
+      this.tui.requestRender();
+      return;
+    }
+
     server.connectionStatus = "connecting";
     this.panelMessage = { kind: "info", text: `Reconnecting ${server.name}...` };
     this.tui.requestRender();
@@ -696,7 +1239,7 @@ class McpPanel {
   private handleDiscardInput(data: string): void {
     if (matchesKey(data, "ctrl+c")) {
       this.cleanup();
-      this.done({ cancelled: true, changes: new Map() });
+      this.done({ cancelled: true, directToolChanges: new Map(), serverChanges: new Map() });
       return;
     }
     if (matchesKey(data, "escape") || data === "n" || data === "N") {
@@ -706,7 +1249,7 @@ class McpPanel {
     if (matchesKey(data, "return")) {
       if (this.discardSelected === 0) {
         this.cleanup();
-        this.done({ cancelled: true, changes: new Map() });
+        this.done({ cancelled: true, directToolChanges: new Map(), serverChanges: new Map() });
       } else {
         this.confirmingDiscard = false;
       }
@@ -714,7 +1257,7 @@ class McpPanel {
     }
     if (data === "y" || data === "Y") {
       this.cleanup();
-      this.done({ cancelled: true, changes: new Map() });
+      this.done({ cancelled: true, directToolChanges: new Map(), serverChanges: new Map() });
       return;
     }
     if (matchesKey(data, "left") || matchesKey(data, "right") || matchesKey(data, "tab")) {
@@ -775,6 +1318,91 @@ class McpPanel {
       fg(t.border, "│") + truncateToWidth(" " + content, innerW, "…", true) + fg(t.border, "│");
     const emptyRow = () => fg(t.border, "│") + " ".repeat(innerW) + fg(t.border, "│");
     const divider = () => fg(t.border, "├" + "─".repeat(innerW) + "┤");
+
+    const rowRaw = (content: string) => {
+      const pad = Math.max(0, innerW - visibleWidth(content));
+      return fg(t.border, "│") + content + " ".repeat(pad) + fg(t.border, "│");
+    };
+
+    if (this.view === "server-editor") {
+      const titleText = " MCP Server JSON ";
+      const borderLen = innerW - visibleWidth(titleText);
+      const leftB = Math.floor(borderLen / 2);
+      const rightB = borderLen - leftB;
+      lines.push(
+        fg(t.border, "╭" + "─".repeat(leftB)) + fg(t.title, titleText) + fg(t.border, "─".repeat(rightB) + "╮"),
+      );
+
+      lines.push(emptyRow());
+
+      const modeLabel = this.serverEditorMode === "add" ? "Add" : "Edit";
+      lines.push(row(fg(t.description, "Mode: ") + fg(t.selected, modeLabel)));
+      if (this.serverEditorMode === "edit" && this.serverEditorTarget) {
+        lines.push(row(fg(t.description, "Server: ") + fg(t.selected, this.serverEditorTarget)));
+      }
+      lines.push(emptyRow());
+
+      if (!this.serverEditor) {
+        lines.push(row(fg(t.cancel, "Editor not initialized.")));
+      } else {
+        const editorLines = this.serverEditor.render(innerW);
+        for (const l of editorLines) {
+          lines.push(rowRaw(l));
+        }
+      }
+
+      if (this.serverEditorMessage) {
+        lines.push(emptyRow());
+        const msgColor = this.serverEditorMessage.kind === "error" ? t.cancel : t.confirm;
+        lines.push(row(fg(msgColor, this.serverEditorMessage.text)));
+      }
+
+      lines.push(divider());
+      lines.push(emptyRow());
+
+      if (this.confirmingEditorDiscard) {
+        const discardBtn = this.editorDiscardSelected === 0
+          ? inverse(bold(fg(t.cancel, "  Discard  ")))
+          : fg(t.hint, "  Discard  ");
+        const keepBtn = this.editorDiscardSelected === 1
+          ? inverse(bold(fg(t.confirm, "  Keep  ")))
+          : fg(t.hint, "  Keep  ");
+        lines.push(row(`Discard editor changes?  ${discardBtn}   ${keepBtn}`));
+      } else {
+        lines.push(row(fg(t.description, "Press Enter to apply JSON and return. Use Shift+Enter for a newline.")));
+      }
+
+      lines.push(emptyRow());
+      const hints = [
+        italic("enter") + " apply",
+        italic("shift+enter") + " newline",
+        italic("esc") + " back",
+        italic("ctrl+s") + " save",
+        italic("ctrl+c") + " quit",
+      ];
+      const gap = "  ";
+      const gapW = 2;
+      const maxW = innerW - 2;
+      let curLine = "";
+      let curW = 0;
+      for (const hint of hints) {
+        const hw = visibleWidth(hint);
+        const needed = curW === 0 ? hw : gapW + hw;
+        if (curW > 0 && curW + needed > maxW) {
+          lines.push(row(fg(t.hint, curLine)));
+          curLine = hint;
+          curW = hw;
+        } else {
+          curLine += (curW > 0 ? gap : "") + hint;
+          curW += needed;
+        }
+      }
+      if (curLine) lines.push(row(fg(t.hint, curLine)));
+
+      lines.push(fg(t.border, "╰" + "─".repeat(innerW) + "╯"));
+      return lines;
+    }
+
 
     if (this.view === "auth") {
       const serverIndex = this.authServerIndex;
@@ -906,10 +1534,12 @@ class McpPanel {
     const searchIcon = fg(t.border, "◎");
     if (this.descSearchActive) {
       lines.push(row(`${searchIcon}  ${fg(t.needsAuth, "desc:")} ${this.descQuery}${cursor}`));
+    } else if (this.nameSearchActive) {
+      lines.push(row(`${searchIcon}  ${fg(t.needsAuth, "name:")} ${this.nameQuery}${cursor}`));
     } else if (this.nameQuery) {
-      lines.push(row(`${searchIcon}  ${this.nameQuery}${cursor}`));
+      lines.push(row(`${searchIcon}  ${fg(t.needsAuth, "name:")} ${this.nameQuery}${fg(t.description, "  (/ to edit)")}`));
     } else {
-      lines.push(row(`${searchIcon}  ${fg(t.placeholder, italic("search..."))}`));
+      lines.push(row(`${searchIcon}  ${fg(t.placeholder, italic("press / to search..."))}`));
     }
 
     lines.push(emptyRow());
@@ -962,7 +1592,17 @@ class McpPanel {
     lines.push(divider());
     lines.push(emptyRow());
 
-    if (this.confirmingDiscard) {
+    if (this.confirmingDelete) {
+      const idx = this.deleteServerIndex;
+      const serverName = typeof idx === "number" ? (this.servers[idx]?.name ?? "(unknown)") : "(unknown)";
+      const deleteBtn = this.deleteSelected === 0
+        ? inverse(bold(fg(t.cancel, "  Delete  ")))
+        : fg(t.hint, "  Delete  ");
+      const cancelBtn = this.deleteSelected === 1
+        ? inverse(bold(fg(t.confirm, "  Cancel  ")))
+        : fg(t.hint, "  Cancel  ");
+      lines.push(row(`Delete server ${fg(t.selected, serverName)}?  ${deleteBtn}   ${cancelBtn}`));
+    } else if (this.confirmingDiscard) {
       const discardBtn = this.discardSelected === 0
         ? inverse(bold(fg(t.cancel, "  Discard  ")))
         : fg(t.hint, "  Discard  ");
@@ -976,8 +1616,11 @@ class McpPanel {
         (sum, s) => sum + s.tools.filter((t) => t.isDirect).reduce((ts, t) => ts + t.estimatedTokens, 0),
         0,
       );
-      const stats =
-        directCount > 0 ? `${directCount} direct  ~${totalTokens.toLocaleString()} tokens` : "no direct tools";
+      const serverOps = this.serverChanges.size;
+      let stats = directCount > 0 ? `${directCount} direct  ~${totalTokens.toLocaleString()} tokens` : "no direct tools";
+      if (serverOps > 0) {
+        stats += fg(t.needsAuth, `  ${serverOps} server change${serverOps === 1 ? "" : "s"}`);
+      }
       lines.push(row(fg(t.description, stats + (this.dirty ? fg(t.needsAuth, "  (unsaved)") : ""))));
     }
 
@@ -986,6 +1629,10 @@ class McpPanel {
       italic("↑↓") + " navigate",
       italic("space") + " toggle",
       italic("⏎") + " expand",
+      italic("n") + " new",
+      italic("e") + " edit",
+      italic("d") + " delete",
+      italic("/") + " search",
       italic("ctrl+r") + " reconnect",
       italic("ctrl+alt+r") + " reconnect all",
       italic("ctrl+a") + " auth",
@@ -1090,7 +1737,7 @@ export function createMcpPanel(
   cache: MetadataCache | null,
   provenance: Map<string, ServerProvenance>,
   callbacks: McpPanelCallbacks,
-  tui: { requestRender(): void },
+  tui: TUI,
   done: (result: McpPanelResult) => void,
 ): McpPanel & { dispose(): void } {
   return new McpPanel(config, cache, provenance, callbacks, tui, done);
