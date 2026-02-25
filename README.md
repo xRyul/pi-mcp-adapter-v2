@@ -3,6 +3,10 @@
 </p>
 
 # Pi MCP Adapter
+> Fork of https://github.com/nicobailon/pi-mcp-adapter (original by Nico Bailon).
+ >
+> Development repo: https://github.com/xRyul/pi-mcp-adapter-v2
+
 
 Use MCP servers with [Pi](https://github.com/badlogic/pi-mono/) without burning your context window.
 
@@ -23,6 +27,15 @@ pi install npm:pi-mcp-adapter
 ```
 
 Restart Pi after installation.
+
+### Local development (this fork)
+
+If you're developing from source, symlink the repo into Pi's extensions directory and run `/reload` in Pi:
+
+```bash
+ln -sfn /path/to/pi-mcp-adapter-v2 ~/.pi/agent/extensions/pi-mcp-adapter-v2
+```
+
 
 ## Quick Start
 

@@ -1,5 +1,6 @@
 // index.ts - Full extension entry point with commands
-import type { ExtensionAPI, ExtensionContext, ToolInfo } from "@mariozechner/pi-coding-agent";
+import { keyHint, type ExtensionAPI, type ExtensionContext, type ToolInfo } from "@mariozechner/pi-coding-agent";
+import { Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { existsSync } from "node:fs";
 import { loadMcpConfig, getServerProvenance, writeDirectToolsConfig } from "./config.js";
@@ -66,6 +67,36 @@ async function parallelLimit<T, R>(
   const workers = Array(Math.min(limit, items.length)).fill(null).map(() => worker());
   await Promise.all(workers);
   return results;
+}
+
+function safeJsonStringify(value: unknown, maxChars = 20_000): string {
+  try {
+    const s = JSON.stringify(value, null, 2);
+    if (typeof s !== "string") return String(value);
+    if (s.length <= maxChars) return s;
+    return s.slice(0, maxChars) + `\n... (truncated, ${s.length} chars total)`;
+  } catch {
+    return String(value);
+  }
+}
+
+function extractTextBlocks(content: unknown): string {
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter((c: any) => c && c.type === "text" && typeof c.text === "string")
+    .map((c: any) => c.text)
+    .join("\n")
+    .trim();
+}
+
+function truncateTextLines(text: string, maxLines: number): { text: string; remaining: number } {
+  const lines = text.split("\n");
+  if (lines.length <= maxLines) return { text, remaining: 0 };
+  return { text: lines.slice(0, maxLines).join("\n"), remaining: lines.length - maxLines };
+}
+
+function fgLines(theme: any, color: string, text: string): string {
+  return text.split("\n").map(line => theme.fg(color, line)).join("\n");
 }
 
 const BUILTIN_NAMES = new Set(["read", "bash", "edit", "write", "grep", "find", "ls", "mcp"]);
@@ -255,6 +286,51 @@ export default function mcpAdapter(pi: ExtensionAPI) {
       label: `MCP: ${spec.originalName}`,
       description: spec.description || "(no description)",
       parameters: Type.Unsafe<Record<string, unknown>>(spec.inputSchema || { type: "object", properties: {} }),
+      ...(spec.originalName === "sequential_thinking"
+        ? {
+            renderResult(result: any, { expanded, isPartial }: { expanded: boolean; isPartial: boolean }, theme: any) {
+              if (isPartial) {
+                return new Text(theme.fg("warning", "Processing..."), 0, 0);
+              }
+
+              const details: any = result?.details ?? {};
+              const outputText = extractTextBlocks(result?.content);
+              const reqArgs = details.mcpRequest?.arguments as any;
+              const thought = reqArgs?.thought;
+
+              if (expanded && typeof thought === "string") {
+                const thoughtNum = reqArgs?.thoughtNumber ?? "?";
+                const totalThoughts = reqArgs?.totalThoughts ?? "?";
+                const sections: string[] = [];
+                sections.push(theme.fg("toolTitle", theme.bold(`Thought ${thoughtNum}/${totalThoughts}`)));
+                sections.push(fgLines(theme, "toolOutput", thought));
+                if (outputText) {
+                  sections.push(theme.fg("muted", "Output:"));
+                  sections.push(fgLines(theme, "toolOutput", outputText));
+                }
+                return new Text(sections.join("\n\n"), 0, 0);
+              }
+
+              if (!outputText) {
+                return new Text(theme.fg("muted", "(empty result)"), 0, 0);
+              }
+              if (expanded) {
+                return new Text(fgLines(theme, "toolOutput", outputText), 0, 0);
+              }
+
+              const { text: truncated, remaining } = truncateTextLines(outputText, 12);
+              let text = fgLines(theme, "toolOutput", truncated);
+
+              if (remaining > 0) {
+                text += "\n" + theme.fg("muted", `... (${remaining} more lines, `) + keyHint("expandTools", "to expand") + theme.fg("muted", ")");
+              } else {
+                text += "\n" + theme.fg("muted", "(") + keyHint("expandTools", "to view thought") + theme.fg("muted", ")");
+              }
+
+              return new Text(text, 0, 0);
+            },
+          }
+        : {}),
       async execute(_toolCallId, params) {
         if (!state && initPromise) {
           try { state = await initPromise; } catch {
@@ -320,13 +396,13 @@ export default function mcpAdapter(pi: ExtensionAPI) {
             }
             return {
               content: [{ type: "text" as const, text: `Error: ${errorText}` }],
-              details: { error: "tool_error", server: spec.serverName },
+              details: { error: "tool_error", server: spec.serverName, tool: spec.originalName, mcpRequest: { name: spec.originalName, arguments: params ?? {} }, mcpResult: result },
             };
           }
 
           return {
             content: content.length > 0 ? content : [{ type: "text" as const, text: "(empty result)" }],
-            details: { server: spec.serverName, tool: spec.originalName },
+            details: { server: spec.serverName, tool: spec.originalName, mcpRequest: { name: spec.originalName, arguments: params ?? {} }, mcpResult: result },
           };
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
@@ -336,7 +412,7 @@ export default function mcpAdapter(pi: ExtensionAPI) {
           }
           return {
             content: [{ type: "text" as const, text: errorText }],
-            details: { error: "call_failed", server: spec.serverName },
+            details: { error: "call_failed", server: spec.serverName, tool: spec.originalName, mcpRequest: { name: spec.originalName, arguments: params ?? {} } },
           };
         } finally {
           s.manager.decrementInFlight(spec.serverName);
@@ -459,6 +535,101 @@ export default function mcpAdapter(pi: ExtensionAPI) {
     name: "mcp",
     label: "MCP",
     description: buildProxyDescription(earlyConfig, earlyCache, directSpecs),
+    renderCall(args: any, theme: any) {
+      let text = theme.fg("toolTitle", theme.bold("mcp"));
+      if (args.tool) {
+        text += theme.fg("muted", " call ");
+        text += theme.fg("accent", String(args.tool));
+        if (args.server) text += theme.fg("muted", " @") + theme.fg("accent", String(args.server));
+      } else if (args.connect) {
+        text += theme.fg("muted", " connect ");
+        text += theme.fg("accent", String(args.connect));
+      } else if (args.describe) {
+        text += theme.fg("muted", " describe ");
+        text += theme.fg("accent", String(args.describe));
+      } else if (args.search) {
+        text += theme.fg("muted", " search ");
+        text += theme.fg("accent", String(args.search));
+        if (args.server) text += theme.fg("muted", " in ") + theme.fg("accent", String(args.server));
+      } else if (args.server) {
+        text += theme.fg("muted", " list ");
+        text += theme.fg("accent", String(args.server));
+      } else {
+        text += theme.fg("muted", " status");
+      }
+      return new Text(text, 0, 0);
+    },
+
+    renderResult(result: any, { expanded, isPartial }: { expanded: boolean; isPartial: boolean }, theme: any) {
+      if (isPartial) {
+        return new Text(theme.fg("warning", "MCP: working..."), 0, 0);
+      }
+
+      const details: any = result?.details ?? {};
+      const mode: string | undefined = details.mode;
+      const outputText = extractTextBlocks(result?.content);
+
+      if (expanded && mode === "call") {
+        const server = details.server as string | undefined;
+        const tool = (details.tool ?? details.mcpRequest?.name) as string | undefined;
+        const reqArgs = details.mcpRequest?.arguments as any;
+
+        const sections: string[] = [];
+        if (server) sections.push(theme.fg("muted", "Server: ") + theme.fg("accent", server));
+        if (tool) sections.push(theme.fg("muted", "Tool: ") + theme.fg("accent", tool));
+
+        if (tool === "sequential_thinking" && reqArgs && typeof reqArgs.thought === "string") {
+          const thoughtNum = reqArgs.thoughtNumber ?? "?";
+          const totalThoughts = reqArgs.totalThoughts ?? "?";
+          const contextBits: string[] = [];
+          if (reqArgs.isRevision) contextBits.push(`revision of ${reqArgs.revisesThought ?? "?"}`);
+          if (reqArgs.branchFromThought) {
+            contextBits.push(`branch from ${reqArgs.branchFromThought}${reqArgs.branchId ? ` (${reqArgs.branchId})` : ""}`);
+          }
+          const header = `Thought ${thoughtNum}/${totalThoughts}${contextBits.length ? ` (${contextBits.join(", ")})` : ""}`;
+          sections.push(theme.fg("toolTitle", theme.bold(header)));
+          sections.push(fgLines(theme, "toolOutput", reqArgs.thought));
+        }
+
+        if (reqArgs && typeof reqArgs === "object") {
+          const argsForJson = (tool === "sequential_thinking" && typeof reqArgs.thought === "string")
+            ? { ...reqArgs, thought: undefined }
+            : reqArgs;
+          sections.push(theme.fg("muted", "Arguments:"));
+          sections.push(fgLines(theme, "toolOutput", safeJsonStringify(argsForJson)));
+        }
+
+        if (outputText) {
+          sections.push(theme.fg("muted", "Output:"));
+          sections.push(fgLines(theme, "toolOutput", outputText));
+        } else {
+          sections.push(theme.fg("muted", "(empty result)"));
+        }
+
+        return new Text(sections.join("\n\n"), 0, 0);
+      }
+
+      if (!outputText) {
+        return new Text(theme.fg("muted", "(empty result)"), 0, 0);
+      }
+
+      if (expanded) {
+        return new Text(fgLines(theme, "toolOutput", outputText), 0, 0);
+      }
+
+      const { text: truncated, remaining } = truncateTextLines(outputText, 12);
+      let text = fgLines(theme, "toolOutput", truncated);
+
+      const isSequentialThinking = details.tool === "sequential_thinking" || details.mcpRequest?.name === "sequential_thinking";
+      if (remaining > 0) {
+        text += "\n" + theme.fg("muted", `... (${remaining} more lines, `) + keyHint("expandTools", "to expand") + theme.fg("muted", ")");
+      } else if (mode === "call" && isSequentialThinking) {
+        text += "\n" + theme.fg("muted", "(") + keyHint("expandTools", "to view thought") + theme.fg("muted", ")");
+      }
+
+      return new Text(text, 0, 0);
+    },
+
     parameters: Type.Object({
       // Call mode
       tool: Type.Optional(Type.String({ description: "Tool name to call (e.g., 'xcodebuild_list_sims')" })),
@@ -1120,13 +1291,13 @@ async function executeCall(
 
       return {
         content: [{ type: "text" as const, text: errorWithSchema }],
-        details: { mode: "call", error: "tool_error", mcpResult: result },
+        details: { mode: "call", error: "tool_error", server: serverName, tool: toolMeta.originalName, requestedTool: toolName, mcpRequest: { name: toolMeta.originalName, arguments: args ?? {} }, mcpResult: result },
       };
     }
 
     return {
       content: content.length > 0 ? content : [{ type: "text" as const, text: "(empty result)" }],
-      details: { mode: "call", mcpResult: result, server: serverName, tool: toolMeta.originalName },
+      details: { mode: "call", mcpResult: result, mcpRequest: { name: toolMeta.originalName, arguments: args ?? {} }, server: serverName, tool: toolMeta.originalName, requestedTool: toolName },
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -1139,7 +1310,7 @@ async function executeCall(
 
     return {
       content: [{ type: "text" as const, text: errorWithSchema }],
-      details: { mode: "call", error: "call_failed", message },
+      details: { mode: "call", error: "call_failed", message, server: serverName, tool: toolMeta.originalName, requestedTool: toolName, mcpRequest: { name: toolMeta.originalName, arguments: args ?? {} } },
     };
   } finally {
     state.manager.decrementInFlight(serverName);
