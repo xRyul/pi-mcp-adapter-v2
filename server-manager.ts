@@ -6,6 +6,7 @@ import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import type { McpTool, McpResource, ServerDefinition, Transport } from "./types.js";
 import { getStoredTokens } from "./oauth-handler.js";
 import { resolveNpxBinary } from "./npx-resolver.js";
+import { logDebug } from "./logger.js";
 
 interface ServerConnection {
   client: Client;
@@ -64,7 +65,7 @@ export class McpServerManager {
         if (resolved) {
           command = resolved.isJs ? "node" : resolved.binPath;
           args = resolved.isJs ? [resolved.binPath, ...resolved.extraArgs] : resolved.extraArgs;
-          console.log(`MCP: ${name} resolved to ${resolved.binPath} (skipping npm parent)`);
+          logDebug(`MCP: ${name} resolved to ${resolved.binPath} (skipping npm parent)`);
         }
       }
 
@@ -130,7 +131,7 @@ export class McpServerManager {
       const tokens = getStoredTokens(serverName);
       if (!tokens) {
         throw new Error(
-          `No OAuth tokens found for "${serverName}". Run /mcp-auth ${serverName} to authenticate.`
+          `No OAuth tokens found for "${serverName}". Open /mcp, select the server and press ctrl+a to set a token.`
         );
       }
       headers["Authorization"] = `Bearer ${tokens.access_token}`;

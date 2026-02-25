@@ -189,8 +189,8 @@ Direct tools register from the metadata cache (`~/.pi/agent/mcp-cache.json`), so
 
 Panel shortcuts:
 - `ctrl+r` reconnect selected server (hard reconnect + refresh cache)
-- `shift+ctrl+r` reconnect all servers
-- `ctrl+a` OAuth setup for selected server (then press `t` to paste token)
+- `ctrl+alt+r` reconnect all servers
+- `ctrl+a` auth setup for selected server (OAuth token paste if configured)
 - `ctrl+s` save direct tool toggles
 
 **Subagent integration:** If you use the subagent extension, agents can request direct MCP tools in their frontmatter with `mcp:server-name` syntax. See the subagent README for details.
@@ -232,10 +232,6 @@ Tool names are fuzzy-matched on hyphens and underscores — `context7_resolve_li
 | Command | What it does |
 |---------|--------------|
 | `/mcp` | Interactive panel (server status, tool toggles, reconnect, OAuth) |
-| `/mcp tools` | List all tools (optional, panel already shows them) |
-| `/mcp reconnect` | Reconnect all servers (optional, panel already supports it) |
-| `/mcp reconnect <server>` | Connect or reconnect a single server (optional, panel already supports it) |
-| `/mcp-auth <server>` | OAuth setup (optional, panel has `ctrl+a`) |
 
 ## How It Works
 

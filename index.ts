@@ -22,6 +22,7 @@ import {
   serializeTools,
   type ServerCacheEntry,
 } from "./metadata-cache.js";
+import { logError, logInfo, logWarn } from "./logger.js";
 
 interface McpExtensionState {
   manager: McpServerManager;
@@ -182,11 +183,11 @@ function resolveDirectTools(
       if (toolFilter !== true && !toolFilter.includes(tool.name)) continue;
       const prefixedName = formatToolName(tool.name, serverName, prefix);
       if (BUILTIN_NAMES.has(prefixedName)) {
-        console.warn(`MCP: skipping direct tool "${prefixedName}" (collides with builtin)`);
+        logWarn(`MCP: skipping direct tool "${prefixedName}" (collides with builtin)`);
         continue;
       }
       if (seenNames.has(prefixedName)) {
-        console.warn(`MCP: skipping duplicate direct tool "${prefixedName}" from "${serverName}"`);
+        logWarn(`MCP: skipping duplicate direct tool "${prefixedName}" from "${serverName}"`);
         continue;
       }
       seenNames.add(prefixedName);
@@ -205,11 +206,11 @@ function resolveDirectTools(
         if (toolFilter !== true && !toolFilter.includes(baseName)) continue;
         const prefixedName = formatToolName(baseName, serverName, prefix);
         if (BUILTIN_NAMES.has(prefixedName)) {
-          console.warn(`MCP: skipping direct resource tool "${prefixedName}" (collides with builtin)`);
+          logWarn(`MCP: skipping direct resource tool "${prefixedName}" (collides with builtin)`);
           continue;
         }
         if (seenNames.has(prefixedName)) {
-          console.warn(`MCP: skipping duplicate direct resource tool "${prefixedName}" from "${serverName}"`);
+          logWarn(`MCP: skipping duplicate direct resource tool "${prefixedName}" from "${serverName}"`);
           continue;
         }
         seenNames.add(prefixedName);
@@ -480,7 +481,7 @@ export default function mcpAdapter(pi: ExtensionAPI) {
       initPromise = null;
       updateStatusBar(s);
     }).catch(err => {
-      console.error("MCP initialization failed:", err);
+      logError("MCP initialization failed", err);
       initPromise = null;
     });
   });
@@ -501,10 +502,10 @@ export default function mcpAdapter(pi: ExtensionAPI) {
     }
   });
   
-  // /mcp command
+  // /mcp command (panel only)
   pi.registerCommand("mcp", {
     description: "Open MCP panel",
-    handler: async (args, ctx) => {
+    handler: async (_args, ctx) => {
       // Wait for init if still in progress
       if (!state && initPromise) {
         try {
@@ -518,64 +519,13 @@ export default function mcpAdapter(pi: ExtensionAPI) {
         if (ctx.hasUI) ctx.ui.notify("MCP not initialized", "error");
         return;
       }
-      
-      const parts = args?.trim()?.split(/\s+/) ?? [];
-      const subcommand = parts[0] ?? "";
-      const targetServer = parts[1];
-      
-      switch (subcommand) {
-        case "reconnect":
-          await reconnectServers(state, ctx, targetServer);
-          break;
-        case "tools":
-          await showTools(state, ctx);
-          break;
-        case "auth":
-          if (!targetServer) {
-            if (ctx.hasUI) ctx.ui.notify("Usage: /mcp auth <server-name>", "error");
-            break;
-          }
-          await authenticateServer(targetServer, state.config, ctx);
-          break;
 
-        case "status":
-        case "":
-        default:
-          if (ctx.hasUI) {
-            await openMcpPanel(state, pi, ctx, earlyConfigPath);
-          } else {
-            await showStatus(state, ctx);
-          }
-          break;
-      }
-    },
-  });
-  
-  // /mcp-auth command
-  pi.registerCommand("mcp-auth", {
-    description: "OAuth setup for an MCP server (use /mcp + ctrl+a)",
-    handler: async (args, ctx) => {
-      const serverName = args?.trim();
-      if (!serverName) {
-        if (ctx.hasUI) ctx.ui.notify("Usage: /mcp-auth <server-name>", "error");
+      if (!ctx.hasUI) {
+        logWarn("MCP: UI not available; /mcp opens an interactive panel.");
         return;
       }
-      
-      // Wait for init if still in progress
-      if (!state && initPromise) {
-        try {
-          state = await initPromise;
-        } catch {
-          if (ctx.hasUI) ctx.ui.notify("MCP initialization failed", "error");
-          return;
-        }
-      }
-      if (!state) {
-        if (ctx.hasUI) ctx.ui.notify("MCP not initialized", "error");
-        return;
-      }
-      
-      await authenticateServer(serverName, state.config, ctx);
+
+      await openMcpPanel(state, pi, ctx, earlyConfigPath);
     },
   });
   
@@ -1138,7 +1088,7 @@ function executeList(state: McpExtensionState, server: string) {
       };
     }
     return {
-      content: [{ type: "text" as const, text: `Server "${server}" is configured but not connected. Use mcp({ connect: "${server}" }) or /mcp reconnect ${server} to retry.` }],
+      content: [{ type: "text" as const, text: `Server "${server}" is configured but not connected. Use mcp({ connect: "${server}" }) to connect, or open /mcp and press ctrl+r on the server.` }],
       details: { mode: "list", server, tools: [], count: 0, error: "not_connected" },
     };
   }
@@ -1483,7 +1433,7 @@ async function initializeMcp(
       if (ctx.hasUI) {
         ctx.ui.notify(`MCP: Failed to connect to ${name}: ${error}`, "error");
       }
-      console.error(`MCP: Failed to connect to ${name}: ${error}`);
+      logError(`MCP: Failed to connect to ${name}: ${error}`);
       continue;
     }
 
@@ -1558,7 +1508,7 @@ async function initializeMcp(
 
   lifecycle.setIdleShutdownCallback((serverName) => {
     const idleMinutes = getEffectiveIdleTimeoutMinutes(state, serverName);
-    console.log(`MCP: ${serverName} shut down (idle ${idleMinutes}m)`);
+    logInfo(`MCP: ${serverName} shut down (idle ${idleMinutes}m)`);
     updateStatusBar(state);
   });
 
@@ -1584,112 +1534,6 @@ function updateServerMetadata(state: McpExtensionState, serverName: string): voi
   state.toolMetadata.set(serverName, metadata);
 }
 
-async function showStatus(state: McpExtensionState, ctx: ExtensionContext): Promise<void> {
-  if (!ctx.hasUI) return;
-  
-  const lines: string[] = ["MCP Server Status:", ""];
-  
-  // Show all configured servers, not just connected ones
-  for (const name of Object.keys(state.config.mcpServers)) {
-    const connection = state.manager.getConnection(name);
-    const toolCount = getToolNames(state, name).length;
-    const failedAgo = getFailureAgeSeconds(state, name);
-    let status = "not connected";
-    let statusIcon = "○";
-    let failed = false;
-
-    if (connection?.status === "connected") {
-      status = "connected";
-      statusIcon = "✓";
-    } else if (failedAgo !== null) {
-      status = `failed ${failedAgo}s ago`;
-      statusIcon = "✗";
-      failed = true;
-    } else if (state.toolMetadata.has(name)) {
-      status = "cached";
-    }
-
-    const toolSuffix = failed ? "" : ` (${toolCount} tools${status === "cached" ? ", cached" : ""})`;
-    lines.push(`${statusIcon} ${name}: ${status}${toolSuffix}`);
-  }
-  
-  if (Object.keys(state.config.mcpServers).length === 0) {
-    lines.push("No MCP servers configured");
-  }
-  
-  ctx.ui.notify(lines.join("\n"), "info");
-}
-
-async function showTools(state: McpExtensionState, ctx: ExtensionContext): Promise<void> {
-  if (!ctx.hasUI) return;
-  
-  const allTools = [...state.toolMetadata.values()].flat().map(m => m.name);
-  
-  if (allTools.length === 0) {
-    ctx.ui.notify("No MCP tools available", "info");
-    return;
-  }
-  
-  const lines = [
-    "MCP Tools:",
-    "",
-    ...allTools.map(t => `  ${t}`),
-    "",
-    `Total: ${allTools.length} tools`,
-  ];
-  
-  ctx.ui.notify(lines.join("\n"), "info");
-}
-
-async function reconnectServers(
-  state: McpExtensionState,
-  ctx: ExtensionContext,
-  targetServer?: string
-): Promise<void> {
-  if (targetServer && !state.config.mcpServers[targetServer]) {
-    if (ctx.hasUI) {
-      ctx.ui.notify(`Server "${targetServer}" not found in config`, "error");
-    }
-    return;
-  }
-
-  const entries = targetServer
-    ? [[targetServer, state.config.mcpServers[targetServer]] as [string, ServerEntry]]
-    : Object.entries(state.config.mcpServers);
-
-  for (const [name, definition] of entries) {
-    try {
-      await state.manager.close(name);
-
-      const connection = await state.manager.connect(name, definition);
-      const prefix = state.config.settings?.toolPrefix ?? "server";
-
-      const { metadata, failedTools } = buildToolMetadata(connection.tools, connection.resources, definition, name, prefix);
-      state.toolMetadata.set(name, metadata);
-      updateMetadataCache(state, name);
-      state.failureTracker.delete(name);
-
-      if (ctx.hasUI) {
-        ctx.ui.notify(
-          `MCP: Reconnected to ${name} (${connection.tools.length} tools, ${connection.resources.length} resources)`,
-          "info"
-        );
-        if (failedTools.length > 0) {
-          ctx.ui.notify(`MCP: ${name} - ${failedTools.length} tools skipped`, "warning");
-        }
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      state.failureTracker.set(name, Date.now());
-      if (ctx.hasUI) {
-        ctx.ui.notify(`MCP: Failed to reconnect to ${name}: ${message}`, "error");
-      }
-    }
-  }
-  
-  // Update status bar with server count
-  updateStatusBar(state);
-}
 
 function buildToolMetadata(
   tools: McpTool[],
@@ -1870,54 +1714,6 @@ async function hardReconnectServer(state: McpExtensionState, serverName: string)
   }
 }
 
-async function authenticateServer(
-  serverName: string,
-  config: McpConfig,
-  ctx: ExtensionContext
-): Promise<void> {
-  if (!ctx.hasUI) return;
-  
-  const definition = config.mcpServers[serverName];
-  if (!definition) {
-    ctx.ui.notify(`Server "${serverName}" not found in config`, "error");
-    return;
-  }
-  
-  if (definition.auth !== "oauth") {
-    ctx.ui.notify(
-      `Server "${serverName}" does not use OAuth authentication.\n` +
-      `Current auth mode: ${definition.auth ?? "none"}`,
-      "error"
-    );
-    return;
-  }
-  
-  if (!definition.url) {
-    ctx.ui.notify(
-      `Server "${serverName}" has no URL configured (OAuth requires HTTP transport)`,
-      "error"
-    );
-    return;
-  }
-  
-  // Show instructions for obtaining OAuth tokens
-  const tokenPath = `~/.pi/agent/mcp-oauth/${serverName}/tokens.json`;
-  
-  ctx.ui.notify(
-    `OAuth setup for "${serverName}":\n\n` +
-    `1. Obtain an access token from your OAuth provider\n` +
-    `2. Create the token file:\n` +
-    `   ${tokenPath}\n\n` +
-    `3. Add your token:\n` +
-    `   {\n` +
-    `     "access_token": "your-token-here",\n` +
-    `     "token_type": "bearer"\n` +
-    `   }\n\n` +
-    `4. Open /mcp, select the server and press ctrl+r to connect (or run /mcp reconnect)\n\n` +
-    `Tip: /mcp → ctrl+a → t lets you paste the token directly in the panel`,
-    "info"
-  );
-}
 
 async function openMcpPanel(
   state: McpExtensionState,

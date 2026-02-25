@@ -118,6 +118,7 @@ class McpPanel {
   private confirmingDiscard = false;
   private discardSelected = 1;
   private importNotice: string | null = null;
+  private panelMessage: { kind: "info" | "error"; text: string } | null = null;
 
   // OAuth setup view (for servers with auth: "oauth")
   private view: "main" | "auth" = "main";
@@ -343,7 +344,7 @@ class McpPanel {
     }
 
     // Reconnect all servers
-    if (matchesKey(data, "shift+ctrl+r")) {
+    if (matchesKey(data, "ctrl+alt+r")) {
       this.reconnectAll();
       return;
     }
@@ -351,13 +352,14 @@ class McpPanel {
     // OAuth setup view for selected server
     if (matchesKey(data, "ctrl+a")) {
       const item = this.visibleItems[this.cursorIndex];
-      if (item?.type === "server") {
-        const server = this.servers[item.serverIndex];
-        if (this.isOAuthServer(server.name)) {
-          this.openAuthView(item.serverIndex);
-          return;
-        }
+      if (!item) {
+        this.panelMessage = { kind: "error", text: "No server selected." };
+        this.tui.requestRender();
+        return;
       }
+      // Open auth view even if the server is not OAuth-capable; the view will explain why.
+      this.openAuthView(item.serverIndex);
+      return;
     }
 
     if (matchesKey(data, "escape")) {
@@ -485,6 +487,9 @@ class McpPanel {
       return;
     }
 
+    const definition = this.config.mcpServers?.[server.name];
+    const oauthReady = definition?.auth === "oauth" && !!definition.url;
+
     // Close view
     if (!this.authEnteringToken && matchesKey(data, "escape")) {
       this.closeAuthView();
@@ -499,6 +504,21 @@ class McpPanel {
 
     // Start entering token
     if (!this.authEnteringToken && (data === "t" || data === "T")) {
+      if (!definition) {
+        this.authMessage = { kind: "error", text: `Server "${server.name}" not found in config.` };
+        this.tui.requestRender();
+        return;
+      }
+      if (definition.auth !== "oauth") {
+        this.authMessage = { kind: "error", text: `Server "${server.name}" is not configured for OAuth (auth=${definition.auth ?? "none"}).` };
+        this.tui.requestRender();
+        return;
+      }
+      if (!oauthReady) {
+        this.authMessage = { kind: "error", text: `Server "${server.name}" has no URL configured (OAuth requires HTTP transport).` };
+        this.tui.requestRender();
+        return;
+      }
       this.authEnteringToken = true;
       this.authTokenInput = "";
       this.authMessage = null;
@@ -595,10 +615,25 @@ class McpPanel {
     if (server.connectionStatus === "connecting") return;
 
     server.connectionStatus = "connecting";
+    this.panelMessage = { kind: "info", text: `Reconnecting ${server.name}...` };
     this.tui.requestRender();
 
+    let ok = false;
+    let crash: string | null = null;
+
     try {
-      await this.callbacks.reconnect(server.name);
+      ok = await this.callbacks.reconnect(server.name);
+    } catch (err) {
+      crash = err instanceof Error ? err.message : String(err);
+    }
+
+    try {
+      if (crash) {
+        server.connectionStatus = "failed";
+        this.panelMessage = { kind: "error", text: `Reconnect crashed for ${server.name}: ${crash}` };
+        return;
+      }
+
       server.connectionStatus = this.callbacks.getConnectionStatus(server.name);
 
       if (server.connectionStatus === "connected") {
@@ -607,9 +642,14 @@ class McpPanel {
           this.rebuildServerTools(server, entry);
         }
         server.hasCachedData = true;
+        this.panelMessage = { kind: "info", text: `Reconnected ${server.name}.` };
+      } else if (server.connectionStatus === "needs-auth") {
+        this.panelMessage = { kind: "error", text: `Server "${server.name}" needs OAuth token (ctrl+a).` };
+      } else if (!ok) {
+        this.panelMessage = { kind: "error", text: `Failed to reconnect ${server.name}.` };
+      } else {
+        this.panelMessage = { kind: "error", text: `Reconnect finished but status is ${server.connectionStatus}.` };
       }
-    } catch {
-      server.connectionStatus = "failed";
     } finally {
       this.cursorIndex = Math.min(this.cursorIndex, Math.max(0, this.visibleItems.length - 1));
       this.tui.requestRender();
@@ -620,6 +660,7 @@ class McpPanel {
     if (this.reconnectAllInProgress) return;
 
     this.reconnectAllInProgress = true;
+    this.panelMessage = { kind: "info", text: "Reconnecting all servers..." };
     this.tui.requestRender();
 
     (async () => {
@@ -628,6 +669,7 @@ class McpPanel {
       }
     })().finally(() => {
       this.reconnectAllInProgress = false;
+      this.panelMessage = { kind: "info", text: "Reconnect all finished." };
       this.tui.requestRender();
     });
   }
@@ -739,8 +781,9 @@ class McpPanel {
       const server = typeof serverIndex === "number" ? this.servers[serverIndex] : undefined;
       const serverName = server?.name ?? "(unknown)";
       const definition = server ? this.config.mcpServers[serverName] : undefined;
+      const oauthReady = definition?.auth === "oauth" && !!definition.url;
 
-      const titleText = " OAuth Setup ";
+      const titleText = " Auth Setup ";
       const borderLen = innerW - visibleWidth(titleText);
       const leftB = Math.floor(borderLen / 2);
       const rightB = borderLen - leftB;
@@ -767,9 +810,18 @@ class McpPanel {
       } else if (!definition) {
         lines.push(row(fg(t.cancel, `Server "${serverName}" not found in config.`)));
       } else if (definition.auth !== "oauth") {
-        lines.push(row(fg(t.cancel, `Server "${serverName}" does not use OAuth (auth=${definition.auth ?? "none"}).`)));
+        const authMode = definition.auth ?? "none";
+        lines.push(row(fg(t.cancel, `OAuth not enabled for "${serverName}" (auth=${authMode}).`)));
+        if (authMode === "bearer") {
+          lines.push(row(fg(t.description, "Bearer tokens are configured in mcp.json (bearerToken/bearerTokenEnv).")));
+        } else if (definition.command) {
+          lines.push(row(fg(t.description, "This is a command/stdio server; no OAuth token is used.")));
+        } else {
+          lines.push(row(fg(t.description, "OAuth setup is only for HTTP servers configured with url + auth:\"oauth\".")));
+        }
       } else if (!definition.url) {
         lines.push(row(fg(t.cancel, `Server "${serverName}" has no URL configured (OAuth requires HTTP transport).`)));
+        lines.push(row(fg(t.description, `Add a \"url\" field for "${serverName}" in mcp.json.`)));
       } else {
         lines.push(row(fg(t.description, "Token file: ") + this.getAuthTokenDisplayPath(serverName)));
         lines.push(emptyRow());
@@ -805,12 +857,18 @@ class McpPanel {
             italic("esc") + " cancel",
             italic("ctrl+c") + " quit",
           ]
-        : [
-            italic("t") + " set token",
-            italic("ctrl+r") + " reconnect",
-            italic("esc") + " back",
-            italic("ctrl+c") + " quit",
-          ];
+        : oauthReady
+          ? [
+              italic("t") + " set token",
+              italic("ctrl+r") + " reconnect",
+              italic("esc") + " back",
+              italic("ctrl+c") + " quit",
+            ]
+          : [
+              italic("ctrl+r") + " reconnect",
+              italic("esc") + " back",
+              italic("ctrl+c") + " quit",
+            ];
 
       const gap = "  ";
       const gapW = 2;
@@ -893,6 +951,12 @@ class McpPanel {
         lines.push(row(fg(t.needsAuth, italic(this.importNotice))));
         lines.push(emptyRow());
       }
+
+      if (this.panelMessage) {
+        const msgColor = this.panelMessage.kind === "error" ? t.cancel : t.confirm;
+        lines.push(row(fg(msgColor, this.panelMessage.text)));
+        lines.push(emptyRow());
+      }
     }
 
     lines.push(divider());
@@ -923,8 +987,8 @@ class McpPanel {
       italic("space") + " toggle",
       italic("⏎") + " expand",
       italic("ctrl+r") + " reconnect",
-      italic("shift+ctrl+r") + " reconnect all",
-      italic("ctrl+a") + " oauth",
+      italic("ctrl+alt+r") + " reconnect all",
+      italic("ctrl+a") + " auth",
       italic("?") + " desc search",
       italic("ctrl+s") + " save",
       italic("esc") + " clear/close",

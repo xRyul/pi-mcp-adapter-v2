@@ -3,6 +3,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync } from "
 import { homedir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import type { McpConfig, ServerEntry, McpSettings, ImportKind, ServerProvenance } from "./types.js";
+import { logWarn } from "./logger.js";
 
 const DEFAULT_CONFIG_PATH = join(homedir(), ".pi", "agent", "mcp.json");
 const PROJECT_CONFIG_NAME = ".pi/mcp.json";
@@ -28,7 +29,7 @@ export function loadMcpConfig(overridePath?: string): McpConfig {
       const raw = JSON.parse(readFileSync(configPath, "utf-8"));
       config = validateConfig(raw);
     } catch (error) {
-      console.warn(`Failed to load MCP config from ${configPath}:`, error);
+      logWarn(`Failed to load MCP config from ${configPath}`, error);
     }
   }
   
@@ -55,7 +56,7 @@ export function loadMcpConfig(overridePath?: string): McpConfig {
           }
         }
       } catch (error) {
-        console.warn(`Failed to import MCP config from ${importKind}:`, error);
+        logWarn(`Failed to import MCP config from ${importKind}`, error);
       }
     }
   }
@@ -73,7 +74,7 @@ export function loadMcpConfig(overridePath?: string): McpConfig {
         config.settings = { ...config.settings, ...validated.settings };
       }
     } catch (error) {
-      console.warn(`Failed to load project MCP config:`, error);
+      logWarn("Failed to load project MCP config", error);
     }
   }
   

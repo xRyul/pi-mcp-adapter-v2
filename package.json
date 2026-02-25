@@ -41,6 +41,7 @@
     "metadata-cache.ts",
     "npx-resolver.ts",
     "oauth-handler.ts",
+    "logger.ts",
     "mcp-panel.ts",
     "README.md",
     "CHANGELOG.md",
