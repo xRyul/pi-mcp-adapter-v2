@@ -86,7 +86,17 @@ function extractTextBlocks(content: unknown): string {
     .filter((c: any) => c && c.type === "text" && typeof c.text === "string")
     .map((c: any) => c.text)
     .join("\n")
+    .replace(/\r/g, "")
     .trim();
+}
+
+function extractImageBlocks(content: unknown): any[] {
+  if (!Array.isArray(content)) return [];
+  return content.filter((c: any) => c && c.type === "image");
+}
+
+function formatImageCount(n: number): string {
+  return n + " image" + (n === 1 ? "" : "s");
 }
 
 function truncateTextLines(text: string, maxLines: number): { text: string; remaining: number } {
@@ -299,7 +309,9 @@ export default function mcpAdapter(pi: ExtensionAPI) {
               }
 
               const details: any = result?.details ?? {};
-              const outputText = extractTextBlocks(result?.content);
+              const content = result?.content;
+              const outputText = extractTextBlocks(content);
+              const imageBlocks = extractImageBlocks(content);
               const reqArgs = details.mcpRequest?.arguments as any;
               const thought = reqArgs?.thought;
 
@@ -309,16 +321,40 @@ export default function mcpAdapter(pi: ExtensionAPI) {
                 const sections: string[] = [];
                 sections.push(theme.fg("toolTitle", theme.bold(`Thought ${thoughtNum}/${totalThoughts}`)));
                 sections.push(fgLines(theme, "toolOutput", thought));
+
                 if (outputText) {
                   sections.push(theme.fg("muted", "Output:"));
                   sections.push(fgLines(theme, "toolOutput", outputText));
                 }
+
+                if (imageBlocks.length > 0) {
+                  sections.push(theme.fg("muted", "Images:"));
+                  const lines = imageBlocks
+                    .map((img: any, i: number) => (i + 1) + ". " + (img.mimeType ?? "image/*"))
+                    .join("\n");
+                  sections.push(fgLines(theme, "toolOutput", lines));
+                }
+
                 return new Text(sections.join("\n\n"), 0, 0);
               }
 
               if (!outputText) {
+                // Some tools return only images. Avoid showing "(empty result)" in that case.
+                if (imageBlocks.length > 0) {
+                  let text = theme.fg("muted", "(" + formatImageCount(imageBlocks.length) + ")");
+                  if (typeof thought === "string") {
+                    text += "\n" + theme.fg("muted", "(") + keyHint("expandTools", "to view thought") + theme.fg("muted", ")");
+                  }
+                  return new Text(text, 0, 0);
+                }
+
+                if (typeof thought === "string") {
+                  return new Text(theme.fg("muted", "(") + keyHint("expandTools", "to view thought") + theme.fg("muted", ")"), 0, 0);
+                }
+
                 return new Text(theme.fg("muted", "(empty result)"), 0, 0);
               }
+
               if (expanded) {
                 return new Text(fgLines(theme, "toolOutput", outputText), 0, 0);
               }
@@ -401,13 +437,13 @@ export default function mcpAdapter(pi: ExtensionAPI) {
             }
             return {
               content: [{ type: "text" as const, text: `Error: ${errorText}` }],
-              details: { error: "tool_error", server: spec.serverName, tool: spec.originalName, mcpRequest: { name: spec.originalName, arguments: params ?? {} }, mcpResult: result },
+              details: { error: "tool_error", server: spec.serverName, tool: spec.originalName, mcpRequest: { name: spec.originalName, arguments: params ?? {} } },
             };
           }
 
           return {
             content: content.length > 0 ? content : [{ type: "text" as const, text: "(empty result)" }],
-            details: { server: spec.serverName, tool: spec.originalName, mcpRequest: { name: spec.originalName, arguments: params ?? {} }, mcpResult: result },
+            details: { server: spec.serverName, tool: spec.originalName, mcpRequest: { name: spec.originalName, arguments: params ?? {} } },
           };
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
@@ -572,7 +608,10 @@ export default function mcpAdapter(pi: ExtensionAPI) {
 
       const details: any = result?.details ?? {};
       const mode: string | undefined = details.mode;
-      const outputText = extractTextBlocks(result?.content);
+      const content = result?.content;
+      const outputText = extractTextBlocks(content);
+      const imageBlocks = extractImageBlocks(content);
+      const isSequentialThinking = isSequentialThinkingToolName(details.tool) || isSequentialThinkingToolName(details.mcpRequest?.name);
 
       if (expanded && mode === "call") {
         const server = details.server as string | undefined;
@@ -607,14 +646,44 @@ export default function mcpAdapter(pi: ExtensionAPI) {
         if (outputText) {
           sections.push(theme.fg("muted", "Output:"));
           sections.push(fgLines(theme, "toolOutput", outputText));
-        } else {
+        } else if (imageBlocks.length === 0) {
           sections.push(theme.fg("muted", "(empty result)"));
+        }
+
+        if (imageBlocks.length > 0) {
+          sections.push(theme.fg("muted", "Images:"));
+          const lines = imageBlocks
+            .map((img: any, i: number) => (i + 1) + ". " + (img.mimeType ?? "image/*"))
+            .join("\n");
+          sections.push(fgLines(theme, "toolOutput", lines));
         }
 
         return new Text(sections.join("\n\n"), 0, 0);
       }
 
       if (!outputText) {
+        if (imageBlocks.length > 0) {
+          if (expanded) {
+            const sections: string[] = [];
+            sections.push(theme.fg("muted", "Images:"));
+            const lines = imageBlocks
+              .map((img: any, i: number) => (i + 1) + ". " + (img.mimeType ?? "image/*"))
+              .join("\n");
+            sections.push(fgLines(theme, "toolOutput", lines));
+            return new Text(sections.join("\n"), 0, 0);
+          }
+
+          let text = theme.fg("muted", "(" + formatImageCount(imageBlocks.length) + ")");
+          if (mode === "call" && isSequentialThinking) {
+            text += "\n" + theme.fg("muted", "(") + keyHint("expandTools", "to view thought") + theme.fg("muted", ")");
+          }
+          return new Text(text, 0, 0);
+        }
+
+        if (mode === "call" && isSequentialThinking) {
+          return new Text(theme.fg("muted", "(") + keyHint("expandTools", "to view thought") + theme.fg("muted", ")"), 0, 0);
+        }
+
         return new Text(theme.fg("muted", "(empty result)"), 0, 0);
       }
 
@@ -625,7 +694,6 @@ export default function mcpAdapter(pi: ExtensionAPI) {
       const { text: truncated, remaining } = truncateTextLines(outputText, 12);
       let text = fgLines(theme, "toolOutput", truncated);
 
-      const isSequentialThinking = isSequentialThinkingToolName(details.tool) || isSequentialThinkingToolName(details.mcpRequest?.name);
       if (remaining > 0) {
         text += "\n" + theme.fg("muted", `... (${remaining} more lines, `) + keyHint("expandTools", "to expand") + theme.fg("muted", ")");
       } else if (mode === "call" && isSequentialThinking) {
@@ -1296,13 +1364,13 @@ async function executeCall(
 
       return {
         content: [{ type: "text" as const, text: errorWithSchema }],
-        details: { mode: "call", error: "tool_error", server: serverName, tool: toolMeta.originalName, requestedTool: toolName, mcpRequest: { name: toolMeta.originalName, arguments: args ?? {} }, mcpResult: result },
+        details: { mode: "call", error: "tool_error", server: serverName, tool: toolMeta.originalName, requestedTool: toolName, mcpRequest: { name: toolMeta.originalName, arguments: args ?? {} } },
       };
     }
 
     return {
       content: content.length > 0 ? content : [{ type: "text" as const, text: "(empty result)" }],
-      details: { mode: "call", mcpResult: result, mcpRequest: { name: toolMeta.originalName, arguments: args ?? {} }, server: serverName, tool: toolMeta.originalName, requestedTool: toolName },
+      details: { mode: "call", mcpRequest: { name: toolMeta.originalName, arguments: args ?? {} }, server: serverName, tool: toolMeta.originalName, requestedTool: toolName },
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
