@@ -1,4 +1,8 @@
 import { matchesKey, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
+
 import type { McpConfig, McpPanelCallbacks, McpPanelResult, ServerProvenance } from "./types.js";
 import { resourceNameToToolName } from "./resource-tools.js";
 import type { MetadataCache, ServerCacheEntry, CachedTool } from "./metadata-cache.js";
@@ -114,7 +118,15 @@ class McpPanel {
   private confirmingDiscard = false;
   private discardSelected = 1;
   private importNotice: string | null = null;
-  private authNotice: string | null = null;
+
+  // OAuth setup view (for servers with auth: "oauth")
+  private view: "main" | "auth" = "main";
+  private authServerIndex: number | null = null;
+  private authEnteringToken = false;
+  private authTokenInput = "";
+  private authMessage: { kind: "info" | "error"; text: string } | null = null;
+  private reconnectAllInProgress = false;
+
   private inactivityTimeout: ReturnType<typeof setTimeout> | null = null;
   private visibleItems: VisibleItem[] = [];
   private tui: { requestRender(): void };
@@ -124,7 +136,7 @@ class McpPanel {
   private static readonly INACTIVITY_MS = 60_000;
 
   constructor(
-    config: McpConfig,
+    private config: McpConfig,
     cache: MetadataCache | null,
     provenance: Map<string, ServerProvenance>,
     private callbacks: McpPanelCallbacks,
@@ -266,14 +278,13 @@ class McpPanel {
   handleInput(data: string): void {
     this.resetInactivityTimeout();
     this.importNotice = null;
-    this.authNotice = null;
 
     if (this.confirmingDiscard) {
       this.handleDiscardInput(data);
       return;
     }
 
-    // Global shortcuts — always work, even during desc search
+    // Global shortcuts — always work, even during auth/token entry
     if (matchesKey(data, "ctrl+c")) {
       this.cleanup();
       this.done({ cancelled: true, changes: new Map() });
@@ -283,6 +294,17 @@ class McpPanel {
     if (matchesKey(data, "ctrl+s")) {
       this.cleanup();
       this.done(this.buildResult());
+      return;
+    }
+
+    // OAuth setup view
+    if (this.view === "auth") {
+      this.handleAuthViewInput(data);
+      return;
+    }
+
+    // If reconnect-all is running, ignore input (except ctrl+c/ctrl+s handled above)
+    if (this.reconnectAllInProgress) {
       return;
     }
 
@@ -320,6 +342,24 @@ class McpPanel {
       return;
     }
 
+    // Reconnect all servers
+    if (matchesKey(data, "shift+ctrl+r")) {
+      this.reconnectAll();
+      return;
+    }
+
+    // OAuth setup view for selected server
+    if (matchesKey(data, "ctrl+a")) {
+      const item = this.visibleItems[this.cursorIndex];
+      if (item?.type === "server") {
+        const server = this.servers[item.serverIndex];
+        if (this.isOAuthServer(server.name)) {
+          this.openAuthView(item.serverIndex);
+          return;
+        }
+      }
+    }
+
     if (matchesKey(data, "escape")) {
       if (this.nameQuery) {
         this.nameQuery = "";
@@ -351,10 +391,6 @@ class McpPanel {
       if (!item) return;
       const server = this.servers[item.serverIndex];
       if (item.type === "server") {
-        if (server.connectionStatus === "needs-auth") {
-          this.authNotice = `OAuth required — run /mcp-auth ${server.name} after closing this panel`;
-          return;
-        }
         server.expanded = !server.expanded;
         this.rebuildVisibleItems();
         this.cursorIndex = Math.min(this.cursorIndex, Math.max(0, this.visibleItems.length - 1));
@@ -373,22 +409,7 @@ class McpPanel {
       const item = this.visibleItems[this.cursorIndex];
       if (!item) return;
       const server = this.servers[item.serverIndex];
-      if (server.connectionStatus === "connecting") return;
-      server.connectionStatus = "connecting";
-      this.callbacks.reconnect(server.name).then(() => {
-        server.connectionStatus = this.callbacks.getConnectionStatus(server.name);
-        if (server.connectionStatus === "connected") {
-          const entry = this.callbacks.refreshCacheAfterReconnect(server.name);
-          if (entry) {
-            this.rebuildServerTools(server, entry);
-          }
-          server.hasCachedData = true;
-        }
-        this.tui.requestRender();
-      }).catch(() => {
-        server.connectionStatus = "failed";
-        this.tui.requestRender();
-      });
+      void this.reconnectServer(server);
       return;
     }
 
@@ -418,6 +439,199 @@ class McpPanel {
       return;
     }
   }
+
+  private isOAuthServer(serverName: string): boolean {
+    return this.config.mcpServers?.[serverName]?.auth === "oauth";
+  }
+
+  private getAuthTokenDisplayPath(serverName: string): string {
+    return `~/.pi/agent/mcp-oauth/${serverName}/tokens.json`;
+  }
+
+  private getAuthTokenFsPath(serverName: string): string {
+    return join(homedir(), ".pi", "agent", "mcp-oauth", serverName, "tokens.json");
+  }
+
+  private writeAuthToken(serverName: string, accessToken: string): void {
+    const tokensPath = this.getAuthTokenFsPath(serverName);
+    mkdirSync(dirname(tokensPath), { recursive: true });
+    const data = { access_token: accessToken, token_type: "bearer" };
+    writeFileSync(tokensPath, JSON.stringify(data, null, 2), "utf-8");
+  }
+
+  private openAuthView(serverIndex: number): void {
+    this.view = "auth";
+    this.authServerIndex = serverIndex;
+    this.authEnteringToken = false;
+    this.authTokenInput = "";
+    this.authMessage = null;
+    this.tui.requestRender();
+  }
+
+  private closeAuthView(): void {
+    this.view = "main";
+    this.authServerIndex = null;
+    this.authEnteringToken = false;
+    this.authTokenInput = "";
+    this.authMessage = null;
+    this.tui.requestRender();
+  }
+
+  private handleAuthViewInput(data: string): void {
+    const serverIndex = this.authServerIndex;
+    const server = typeof serverIndex === "number" ? this.servers[serverIndex] : undefined;
+    if (!server) {
+      this.closeAuthView();
+      return;
+    }
+
+    // Close view
+    if (!this.authEnteringToken && matchesKey(data, "escape")) {
+      this.closeAuthView();
+      return;
+    }
+
+    // Reconnect server
+    if (!this.authEnteringToken && matchesKey(data, "ctrl+r")) {
+      void this.reconnectServer(server);
+      return;
+    }
+
+    // Start entering token
+    if (!this.authEnteringToken && (data === "t" || data === "T")) {
+      this.authEnteringToken = true;
+      this.authTokenInput = "";
+      this.authMessage = null;
+      this.tui.requestRender();
+      return;
+    }
+
+    if (!this.authEnteringToken) {
+      return;
+    }
+
+    // Token entry mode
+    if (matchesKey(data, "escape")) {
+      this.authEnteringToken = false;
+      this.authTokenInput = "";
+      this.authMessage = null;
+      this.tui.requestRender();
+      return;
+    }
+
+    if (matchesKey(data, "backspace")) {
+      if (this.authTokenInput.length > 0) {
+        this.authTokenInput = this.authTokenInput.slice(0, -1);
+        this.tui.requestRender();
+      }
+      return;
+    }
+
+    if (matchesKey(data, "return")) {
+      const token = this.authTokenInput.trim();
+      if (!token) {
+        this.authMessage = { kind: "error", text: "Access token is empty." };
+        this.tui.requestRender();
+        return;
+      }
+
+      this.authEnteringToken = false;
+      this.authTokenInput = "";
+      this.authMessage = { kind: "info", text: "Token saved. Connecting..." };
+      this.tui.requestRender();
+
+      (async () => {
+        try {
+          this.writeAuthToken(server.name, token);
+        } catch (e) {
+          this.authMessage = {
+            kind: "error",
+            text: `Failed to write tokens.json: ${e instanceof Error ? e.message : String(e)}`,
+          };
+          this.tui.requestRender();
+          return;
+        }
+
+        await this.reconnectServer(server);
+
+        if (server.connectionStatus === "connected") {
+          this.authMessage = { kind: "info", text: "Connected." };
+        } else if (server.connectionStatus === "needs-auth") {
+          this.authMessage = { kind: "error", text: "Still needs OAuth token." };
+        } else if (server.connectionStatus === "failed") {
+          this.authMessage = { kind: "error", text: "Connection failed. Check token and server configuration." };
+        } else {
+          this.authMessage = { kind: "info", text: "Done." };
+        }
+        this.tui.requestRender();
+      })().catch(() => {});
+      return;
+    }
+
+    // Ignore navigation keys while entering token
+    if (
+      matchesKey(data, "up") ||
+      matchesKey(data, "down") ||
+      matchesKey(data, "left") ||
+      matchesKey(data, "right") ||
+      matchesKey(data, "tab")
+    ) {
+      return;
+    }
+
+    // Accept pasted chunks (strip bracketed paste wrappers if present)
+    let chunk = data;
+    chunk = chunk.replace(/^\x1b\[200~/, "").replace(/\x1b\[201~$/, "");
+    for (const ch of chunk) {
+      const code = ch.charCodeAt(0);
+      if (code >= 32 && code !== 127) {
+        this.authTokenInput += ch;
+      }
+    }
+    this.tui.requestRender();
+  }
+
+  private async reconnectServer(server: ServerState): Promise<void> {
+    if (server.connectionStatus === "connecting") return;
+
+    server.connectionStatus = "connecting";
+    this.tui.requestRender();
+
+    try {
+      await this.callbacks.reconnect(server.name);
+      server.connectionStatus = this.callbacks.getConnectionStatus(server.name);
+
+      if (server.connectionStatus === "connected") {
+        const entry = this.callbacks.refreshCacheAfterReconnect(server.name);
+        if (entry) {
+          this.rebuildServerTools(server, entry);
+        }
+        server.hasCachedData = true;
+      }
+    } catch {
+      server.connectionStatus = "failed";
+    } finally {
+      this.cursorIndex = Math.min(this.cursorIndex, Math.max(0, this.visibleItems.length - 1));
+      this.tui.requestRender();
+    }
+  }
+
+  private reconnectAll(): void {
+    if (this.reconnectAllInProgress) return;
+
+    this.reconnectAllInProgress = true;
+    this.tui.requestRender();
+
+    (async () => {
+      for (const server of this.servers) {
+        await this.reconnectServer(server);
+      }
+    })().finally(() => {
+      this.reconnectAllInProgress = false;
+      this.tui.requestRender();
+    });
+  }
+
 
   private toggleItem(item: VisibleItem): void {
     const server = this.servers[item.serverIndex];
@@ -520,6 +734,108 @@ class McpPanel {
     const emptyRow = () => fg(t.border, "│") + " ".repeat(innerW) + fg(t.border, "│");
     const divider = () => fg(t.border, "├" + "─".repeat(innerW) + "┤");
 
+    if (this.view === "auth") {
+      const serverIndex = this.authServerIndex;
+      const server = typeof serverIndex === "number" ? this.servers[serverIndex] : undefined;
+      const serverName = server?.name ?? "(unknown)";
+      const definition = server ? this.config.mcpServers[serverName] : undefined;
+
+      const titleText = " OAuth Setup ";
+      const borderLen = innerW - visibleWidth(titleText);
+      const leftB = Math.floor(borderLen / 2);
+      const rightB = borderLen - leftB;
+      lines.push(fg(t.border, "╭" + "─".repeat(leftB)) + fg(t.title, titleText) + fg(t.border, "─".repeat(rightB) + "╮"));
+
+      lines.push(emptyRow());
+      lines.push(row(fg(t.description, "Server: ") + fg(t.selected, serverName)));
+      if (definition?.url) {
+        lines.push(row(fg(t.description, "URL: ") + fg(t.description, definition.url)));
+      }
+      if (server) {
+        const statusColor =
+          server.connectionStatus === "connected" ? t.direct :
+          server.connectionStatus === "failed" ? t.cancel :
+          server.connectionStatus === "needs-auth" ? t.needsAuth :
+          server.connectionStatus === "connecting" ? t.needsAuth :
+          t.description;
+        lines.push(row(fg(t.description, "Status: ") + fg(statusColor, server.connectionStatus)));
+      }
+      lines.push(emptyRow());
+
+      if (!server) {
+        lines.push(row(fg(t.cancel, "No server selected.")));
+      } else if (!definition) {
+        lines.push(row(fg(t.cancel, `Server "${serverName}" not found in config.`)));
+      } else if (definition.auth !== "oauth") {
+        lines.push(row(fg(t.cancel, `Server "${serverName}" does not use OAuth (auth=${definition.auth ?? "none"}).`)));
+      } else if (!definition.url) {
+        lines.push(row(fg(t.cancel, `Server "${serverName}" has no URL configured (OAuth requires HTTP transport).`)));
+      } else {
+        lines.push(row(fg(t.description, "Token file: ") + this.getAuthTokenDisplayPath(serverName)));
+        lines.push(emptyRow());
+
+        if (this.authEnteringToken) {
+          lines.push(row(fg(t.needsAuth, "Paste access_token (hidden). Press ⏎ to save, Esc to cancel.")));
+          lines.push(row(fg(t.description, `Token length: ${this.authTokenInput.length} chars`)));
+        } else {
+          lines.push(row(`Press ${fg(t.selected, "t")} to paste/set an access token (hidden).`));
+          lines.push(row(`Or create the file manually, then press ${fg(t.selected, "ctrl+r")} to connect.`));
+          lines.push(emptyRow());
+          lines.push(row(fg(t.description, "{")));
+          lines.push(row(fg(t.description, '  "access_token": "your-token-here",')));
+          lines.push(row(fg(t.description, '  "token_type": "bearer"')));
+          lines.push(row(fg(t.description, "}")));
+        }
+      }
+
+      if (this.authMessage) {
+        lines.push(emptyRow());
+        const msgColor = this.authMessage.kind === "error" ? t.cancel : t.confirm;
+        lines.push(row(fg(msgColor, this.authMessage.text)));
+      }
+
+      lines.push(emptyRow());
+      lines.push(divider());
+      lines.push(emptyRow());
+
+      const hints = this.authEnteringToken
+        ? [
+            italic("⏎") + " save token",
+            italic("backspace") + " delete",
+            italic("esc") + " cancel",
+            italic("ctrl+c") + " quit",
+          ]
+        : [
+            italic("t") + " set token",
+            italic("ctrl+r") + " reconnect",
+            italic("esc") + " back",
+            italic("ctrl+c") + " quit",
+          ];
+
+      const gap = "  ";
+      const gapW = 2;
+      const maxW = innerW - 2;
+      let curLine = "";
+      let curW = 0;
+      for (const hint of hints) {
+        const hw = visibleWidth(hint);
+        const needed = curW === 0 ? hw : gapW + hw;
+        if (curW > 0 && curW + needed > maxW) {
+          lines.push(row(fg(t.hint, curLine)));
+          curLine = hint;
+          curW = hw;
+        } else {
+          curLine += (curW > 0 ? gap : "") + hint;
+          curW += needed;
+        }
+      }
+      if (curLine) lines.push(row(fg(t.hint, curLine)));
+
+      lines.push(fg(t.border, "╰" + "─".repeat(innerW) + "╯"));
+      return lines;
+    }
+
+
     const titleText = " MCP Servers ";
     const borderLen = innerW - visibleWidth(titleText);
     const leftB = Math.floor(borderLen / 2);
@@ -577,10 +893,6 @@ class McpPanel {
         lines.push(row(fg(t.needsAuth, italic(this.importNotice))));
         lines.push(emptyRow());
       }
-      if (this.authNotice) {
-        lines.push(row(fg(t.needsAuth, italic(this.authNotice))));
-        lines.push(emptyRow());
-      }
     }
 
     lines.push(divider());
@@ -611,6 +923,8 @@ class McpPanel {
       italic("space") + " toggle",
       italic("⏎") + " expand",
       italic("ctrl+r") + " reconnect",
+      italic("shift+ctrl+r") + " reconnect all",
+      italic("ctrl+a") + " oauth",
       italic("?") + " desc search",
       italic("ctrl+s") + " save",
       italic("esc") + " clear/close",
@@ -650,8 +964,14 @@ class McpPanel {
     const nameStr = isCursor ? bold(fg(t.selected, server.name)) : server.name;
     const importLabel = server.source === "import" ? fg(t.description, ` (${server.importKind ?? "import"})`) : "";
 
+    let statusIcon = fg(t.description, "○");
+    if (server.connectionStatus === "connected") statusIcon = fg(t.direct, "✓");
+    else if (server.connectionStatus === "failed") statusIcon = fg(t.cancel, "✗");
+    else if (server.connectionStatus === "needs-auth") statusIcon = fg(t.needsAuth, "⚠");
+    else if (server.connectionStatus === "connecting") statusIcon = fg(t.needsAuth, "…");
+
     if (!server.hasCachedData) {
-      return `${prefix}   ${nameStr}${importLabel}  ${fg(t.description, "(not cached)")}`;
+      return `${prefix} ${statusIcon}  ${nameStr}${importLabel}  ${fg(t.description, "(not cached)")}`;
     }
 
     const directCount = server.tools.filter((t) => t.isDirect).length;
@@ -673,7 +993,7 @@ class McpPanel {
       toolInfo = fg(t.description, toolInfo);
     }
 
-    return `${prefix} ${toggleIcon} ${nameStr}${importLabel}  ${toolInfo}`;
+    return `${prefix} ${statusIcon} ${toggleIcon} ${nameStr}${importLabel}  ${toolInfo}`;
   }
 
   private renderToolRow(tool: ToolState, isCursor: boolean, innerW: number): string {

@@ -183,9 +183,15 @@ Per-server `directTools` overrides the global setting. The example above registe
 
 Each direct tool costs ~150-300 tokens in the system prompt (name + description + schema). Good for targeted sets of 5-20 tools. For servers with 75+ tools, stick with the proxy or pick specific tools with a `string[]`.
 
-Direct tools register from the metadata cache (`~/.pi/agent/mcp-cache.json`), so no server connections are needed at startup. On the first session after adding `directTools` to a new server, the cache won't exist yet — tools fall back to proxy-only and the cache populates in the background. Restart Pi and they'll be available. To force it: `/mcp reconnect <server>` then restart.
+Direct tools register from the metadata cache (`~/.pi/agent/mcp-cache.json`), so no server connections are needed at startup. On the first session after adding `directTools` to a new server, the cache won't exist yet — tools fall back to proxy-only and the cache populates in the background. Restart Pi and they'll be available. To force-refresh the cache: open `/mcp`, select the server and press `ctrl+r`, then restart Pi.
 
-**Interactive configuration:** Run `/mcp` to open an interactive panel showing all servers with connection status, tools, and direct/proxy toggles. You can reconnect servers, initiate OAuth, and toggle tools between direct and proxy — all from one overlay. Changes are written to your config file; restart Pi to apply.
+**Interactive configuration:** Run `/mcp` to open an interactive panel showing all servers with connection status, tools, and direct/proxy toggles. Reconnect servers, set OAuth tokens, and toggle tools between direct and proxy — all from one overlay. Changes are written to your config file; restart Pi to apply.
+
+Panel shortcuts:
+- `ctrl+r` reconnect selected server (hard reconnect + refresh cache)
+- `shift+ctrl+r` reconnect all servers
+- `ctrl+a` OAuth setup for selected server (then press `t` to paste token)
+- `ctrl+s` save direct tool toggles
 
 **Subagent integration:** If you use the subagent extension, agents can request direct MCP tools in their frontmatter with `mcp:server-name` syntax. See the subagent README for details.
 
@@ -225,11 +231,11 @@ Tool names are fuzzy-matched on hyphens and underscores — `context7_resolve_li
 
 | Command | What it does |
 |---------|--------------|
-| `/mcp` | Interactive panel (server status, tool toggles, reconnect) |
-| `/mcp tools` | List all tools |
-| `/mcp reconnect` | Reconnect all servers |
-| `/mcp reconnect <server>` | Connect or reconnect a single server |
-| `/mcp-auth <server>` | OAuth setup |
+| `/mcp` | Interactive panel (server status, tool toggles, reconnect, OAuth) |
+| `/mcp tools` | List all tools (optional, panel already shows them) |
+| `/mcp reconnect` | Reconnect all servers (optional, panel already supports it) |
+| `/mcp reconnect <server>` | Connect or reconnect a single server (optional, panel already supports it) |
+| `/mcp-auth <server>` | OAuth setup (optional, panel has `ctrl+a`) |
 
 ## How It Works
 
