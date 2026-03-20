@@ -1687,12 +1687,6 @@ class McpPanel {
 
     const directCount = server.tools.filter((t) => t.isDirect).length;
     const totalCount = server.tools.length;
-    let toggleIcon = fg(t.description, "○");
-    if (directCount === totalCount && totalCount > 0) {
-      toggleIcon = fg(t.direct, "●");
-    } else if (directCount > 0) {
-      toggleIcon = fg(t.needsAuth, "◐");
-    }
 
     let toolInfo = "";
     if (totalCount > 0) {
@@ -1704,7 +1698,7 @@ class McpPanel {
       toolInfo = fg(t.description, toolInfo);
     }
 
-    return `${prefix} ${statusIcon} ${toggleIcon} ${nameStr}${importLabel}  ${toolInfo}`;
+    return `${prefix} ${statusIcon} ${nameStr}${importLabel}  ${toolInfo}`;
   }
 
   private renderToolRow(tool: ToolState, isCursor: boolean, innerW: number): string {
