@@ -344,13 +344,13 @@ export default function mcpAdapter(pi: ExtensionAPI) {
                 if (imageBlocks.length > 0) {
                   let text = theme.fg("muted", "(" + formatImageCount(imageBlocks.length) + ")");
                   if (typeof thought === "string") {
-                    text += "\n" + theme.fg("muted", "(") + keyHint("expandTools", "to view thought") + theme.fg("muted", ")");
+                    text += "\n" + theme.fg("muted", "(") + keyHint("app.tools.expand", "to view thought") + theme.fg("muted", ")");
                   }
                   return new Text(text, 0, 0);
                 }
 
                 if (typeof thought === "string") {
-                  return new Text(theme.fg("muted", "(") + keyHint("expandTools", "to view thought") + theme.fg("muted", ")"), 0, 0);
+                  return new Text(theme.fg("muted", "(") + keyHint("app.tools.expand", "to view thought") + theme.fg("muted", ")"), 0, 0);
                 }
 
                 return new Text(theme.fg("muted", "(empty result)"), 0, 0);
@@ -364,9 +364,9 @@ export default function mcpAdapter(pi: ExtensionAPI) {
               let text = fgLines(theme, "toolOutput", truncated);
 
               if (remaining > 0) {
-                text += "\n" + theme.fg("muted", `... (${remaining} more lines, `) + keyHint("expandTools", "to expand") + theme.fg("muted", ")");
+                text += "\n" + theme.fg("muted", `... (${remaining} more lines, `) + keyHint("app.tools.expand", "to expand") + theme.fg("muted", ")");
               } else {
-                text += "\n" + theme.fg("muted", "(") + keyHint("expandTools", "to view thought") + theme.fg("muted", ")");
+                text += "\n" + theme.fg("muted", "(") + keyHint("app.tools.expand", "to view thought") + theme.fg("muted", ")");
               }
 
               return new Text(text, 0, 0);
@@ -633,13 +633,13 @@ export default function mcpAdapter(pi: ExtensionAPI) {
 
           let text = theme.fg("muted", "(" + formatImageCount(imageBlocks.length) + ")");
           if (mode === "call" && isSequentialThinking) {
-            text += "\n" + theme.fg("muted", "(") + keyHint("expandTools", "to view thought") + theme.fg("muted", ")");
+            text += "\n" + theme.fg("muted", "(") + keyHint("app.tools.expand", "to view thought") + theme.fg("muted", ")");
           }
           return new Text(text, 0, 0);
         }
 
         if (mode === "call" && isSequentialThinking) {
-          return new Text(theme.fg("muted", "(") + keyHint("expandTools", "to view thought") + theme.fg("muted", ")"), 0, 0);
+          return new Text(theme.fg("muted", "(") + keyHint("app.tools.expand", "to view thought") + theme.fg("muted", ")"), 0, 0);
         }
 
         return new Text(theme.fg("muted", "(empty result)"), 0, 0);
@@ -653,9 +653,9 @@ export default function mcpAdapter(pi: ExtensionAPI) {
       let text = fgLines(theme, "toolOutput", truncated);
 
       if (remaining > 0) {
-        text += "\n" + theme.fg("muted", `... (${remaining} more lines, `) + keyHint("expandTools", "to expand") + theme.fg("muted", ")");
+        text += "\n" + theme.fg("muted", `... (${remaining} more lines, `) + keyHint("app.tools.expand", "to expand") + theme.fg("muted", ")");
       } else if (mode === "call" && isSequentialThinking) {
-        text += "\n" + theme.fg("muted", "(") + keyHint("expandTools", "to view thought") + theme.fg("muted", ")");
+        text += "\n" + theme.fg("muted", "(") + keyHint("app.tools.expand", "to view thought") + theme.fg("muted", ")");
       }
 
       return new Text(text, 0, 0);
