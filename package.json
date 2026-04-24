@@ -1,16 +1,16 @@
 {
   "name": "pi-mcp-adapter",
-  "version": "2.2.3",
+  "version": "2.4.3",
   "description": "MCP (Model Context Protocol) adapter extension for Pi coding agent",
   "type": "module",
   "license": "MIT",
   "author": "xRyul",
   "bin": {
-    "pi-mcp-adapter": "./cli.js"
+    "pi-mcp-adapter": "cli.js"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/xRyul/pi-mcp-adapter-v2"
+    "url": "git+https://github.com/xRyul/pi-mcp-adapter-v2.git"
   },
   "keywords": [
     "pi-package",
@@ -44,11 +44,11 @@
     "zod": "^3.25.0 || ^4.0.0"
   },
   "devDependencies": {
-    "@mariozechner/pi-ai": "^0.57.1",
-    "@mariozechner/pi-coding-agent": "^0.57.1",
-    "@mariozechner/pi-tui": "^0.57.1",
-    "@types/node": "^20.0.0",
-    "typescript": "^5.0.0",
+    "@mariozechner/pi-ai": "0.67.5",
+    "@mariozechner/pi-coding-agent": "0.67.5",
+    "@mariozechner/pi-tui": "0.67.5",
+    "@types/node": "^24.12.2",
+    "typescript": "^5.9.3",
     "zod": "^3.25.0"
   }
 }

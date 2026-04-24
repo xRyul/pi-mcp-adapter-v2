@@ -1,14 +1,10 @@
 // types.ts - Core type definitions
-import type { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import type { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
-import type { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { TextContent, ImageContent } from "@mariozechner/pi-ai";
 
-// Transport type (stdio + HTTP)
-export type Transport = 
-  | StdioClientTransport 
-  | SSEClientTransport 
-  | StreamableHTTPClientTransport;
+// Runtime transport handle used by the adapter.
+export interface Transport {
+  close(): Promise<void>;
+}
 
 // Import sources for config
 export type ImportKind = 

@@ -2,7 +2,13 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import type { OAuthTokens } from "@modelcontextprotocol/sdk/shared/auth.js";
+
+export interface OAuthTokens {
+  access_token: string;
+  token_type?: string;
+  refresh_token?: string;
+  expires_in?: number;
+}
 
 // Token storage path for a server
 function getTokensPath(serverName: string): string {

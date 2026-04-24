@@ -1,16 +1,93 @@
 // server-manager.ts - MCP connection management (stdio + HTTP)
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
-import type { McpTool, McpResource, ServerDefinition, Transport } from "./types.js";
+import type { McpContent, McpTool, McpResource, ServerDefinition } from "./types.js";
 import { getStoredTokens } from "./oauth-handler.js";
 import { resolveNpxBinary } from "./npx-resolver.js";
 import { logDebug } from "./logger.js";
 
+type RuntimeTransport = {
+  close(): Promise<void>;
+};
+
+type RuntimeReadResourceContent = Record<string, unknown> & {
+  text?: string;
+  blob?: string;
+  mimeType?: string;
+};
+
+type RuntimeCallToolResult = {
+  content?: McpContent[];
+  isError?: boolean;
+};
+
+type RuntimeClient = {
+  connect(transport: RuntimeTransport): Promise<void>;
+  close(): Promise<void>;
+  listTools(args?: { cursor?: string }): Promise<{ tools?: McpTool[]; nextCursor?: string }>;
+  listResources(args?: { cursor?: string }): Promise<{ resources?: McpResource[]; nextCursor?: string }>;
+  readResource(params: { uri: string }): Promise<{ contents?: RuntimeReadResourceContent[] }>;
+  callTool(params: { name: string; arguments?: Record<string, unknown> }): Promise<RuntimeCallToolResult>;
+};
+
+type RuntimeSdk = {
+  Client: new (info: { name: string; version: string }) => RuntimeClient;
+  StdioClientTransport: new (options: {
+    command: string;
+    args: string[];
+    env: Record<string, string>;
+    cwd?: string;
+    stderr?: "inherit" | "ignore";
+  }) => RuntimeTransport;
+  StreamableHTTPClientTransport: new (
+    url: URL,
+    options?: { requestInit?: { headers?: Record<string, string> } },
+  ) => RuntimeTransport;
+  SSEClientTransport: new (
+    url: URL,
+    options?: { requestInit?: { headers?: Record<string, string> } },
+  ) => RuntimeTransport;
+};
+
+let runtimeSdkPromise: Promise<RuntimeSdk | null> | undefined;
+
+export function getMcpSdkMissingMessage(): string {
+  return 'pi-mcp-adapter-v2 is running in disabled mode because "@modelcontextprotocol/sdk" is not installed locally.';
+}
+
+async function loadRuntimeSdk(): Promise<RuntimeSdk | null> {
+  if (!runtimeSdkPromise) {
+    runtimeSdkPromise = Promise.all([
+      import("@modelcontextprotocol/sdk/client/index.js"),
+      import("@modelcontextprotocol/sdk/client/stdio.js"),
+      import("@modelcontextprotocol/sdk/client/streamableHttp.js"),
+      import("@modelcontextprotocol/sdk/client/sse.js"),
+    ])
+      .then(([clientMod, stdioMod, streamableMod, sseMod]) => ({
+        Client: clientMod.Client,
+        StdioClientTransport: stdioMod.StdioClientTransport,
+        StreamableHTTPClientTransport: streamableMod.StreamableHTTPClientTransport,
+        SSEClientTransport: sseMod.SSEClientTransport,
+      }))
+      .catch(() => null);
+  }
+
+  return runtimeSdkPromise;
+}
+
+export async function hasMcpSdk(): Promise<boolean> {
+  return (await loadRuntimeSdk()) !== null;
+}
+
+async function requireRuntimeSdk(): Promise<RuntimeSdk> {
+  const sdk = await loadRuntimeSdk();
+  if (!sdk) {
+    throw new Error(getMcpSdkMissingMessage());
+  }
+  return sdk;
+}
+
 interface ServerConnection {
-  client: Client;
-  transport: Transport;
+  client: RuntimeClient;
+  transport: RuntimeTransport;
   definition: ServerDefinition;
   tools: McpTool[];
   resources: McpResource[];
@@ -52,9 +129,10 @@ export class McpServerManager {
     name: string,
     definition: ServerDefinition
   ): Promise<ServerConnection> {
-    const client = new Client({ name: `pi-mcp-${name}`, version: "1.0.0" });
+    const sdk = await requireRuntimeSdk();
+    const client = new sdk.Client({ name: `pi-mcp-${name}`, version: "1.0.0" });
     
-    let transport: Transport;
+    let transport: RuntimeTransport;
     
     if (definition.command) {
       let command = definition.command;
@@ -69,7 +147,7 @@ export class McpServerManager {
         }
       }
 
-      transport = new StdioClientTransport({
+      transport = new sdk.StdioClientTransport({
         command,
         args,
         env: resolveEnv(definition.env),
@@ -110,7 +188,8 @@ export class McpServerManager {
     }
   }
   
-  private async createHttpTransport(definition: ServerDefinition, serverName?: string): Promise<Transport> {
+  private async createHttpTransport(definition: ServerDefinition, serverName?: string): Promise<RuntimeTransport> {
+    const sdk = await requireRuntimeSdk();
     const url = new URL(definition.url!);
     const headers = resolveHeaders(definition.headers) ?? {};
     
@@ -140,28 +219,28 @@ export class McpServerManager {
     const requestInit = Object.keys(headers).length > 0 ? { headers } : undefined;
     
     // Try StreamableHTTP first (modern MCP servers)
-    const streamableTransport = new StreamableHTTPClientTransport(url, { requestInit });
+    const streamableTransport = new sdk.StreamableHTTPClientTransport(url, { requestInit });
     
     try {
       // Create a test client to verify the transport works
-      const testClient = new Client({ name: "pi-mcp-probe", version: "1.0.0" });
+      const testClient = new sdk.Client({ name: "pi-mcp-probe", version: "1.0.0" });
       await testClient.connect(streamableTransport);
       await testClient.close().catch(() => {});
       // Close probe transport before creating fresh one
       await streamableTransport.close().catch(() => {});
       
       // StreamableHTTP works - create fresh transport for actual use
-      return new StreamableHTTPClientTransport(url, { requestInit });
+      return new sdk.StreamableHTTPClientTransport(url, { requestInit });
     } catch {
       // StreamableHTTP failed, close and try SSE fallback
       await streamableTransport.close().catch(() => {});
       
       // SSE is the legacy transport
-      return new SSEClientTransport(url, { requestInit });
+      return new sdk.SSEClientTransport(url, { requestInit });
     }
   }
   
-  private async fetchAllTools(client: Client): Promise<McpTool[]> {
+  private async fetchAllTools(client: RuntimeClient): Promise<McpTool[]> {
     const allTools: McpTool[] = [];
     let cursor: string | undefined;
     
@@ -174,7 +253,7 @@ export class McpServerManager {
     return allTools;
   }
   
-  private async fetchAllResources(client: Client): Promise<McpResource[]> {
+  private async fetchAllResources(client: RuntimeClient): Promise<McpResource[]> {
     try {
       const allResources: McpResource[] = [];
       let cursor: string | undefined;

@@ -1,11 +1,11 @@
 // index.ts - Full extension entry point with commands
-import { keyHint, type ExtensionAPI, type ExtensionContext, type ToolInfo } from "@mariozechner/pi-coding-agent";
+import { keyHint, type AgentToolResult, type ExtensionAPI, type ExtensionContext, type ToolInfo } from "@mariozechner/pi-coding-agent";
 import { Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { existsSync } from "node:fs";
 import { loadMcpConfig, getServerProvenance, writeDirectToolsConfig, writeServerConfigChanges } from "./config.js";
 import { formatToolName, getServerPrefix, type McpConfig, type McpContent, type ToolMetadata, type McpTool, type McpResource, type ServerEntry, type DirectToolSpec, type McpPanelCallbacks, type McpPanelResult } from "./types.js";
-import { McpServerManager } from "./server-manager.js";
+import { McpServerManager, getMcpSdkMissingMessage, hasMcpSdk } from "./server-manager.js";
 import { McpLifecycleManager } from "./lifecycle.js";
 import { transformMcpContent } from "./tool-registrar.js";
 import { resourceNameToToolName } from "./resource-tools.js";
@@ -30,7 +30,19 @@ interface McpExtensionState {
   toolMetadata: Map<string, ToolMetadata[]>;  // server -> tool metadata for searching
   config: McpConfig;
   failureTracker: Map<string, number>;
+  runtimeIssue?: string;
   ui?: ExtensionContext["ui"];
+}
+
+interface DirectToolResultDetails {
+  error?: string;
+  server?: string;
+  resourceUri?: string;
+  tool?: string;
+  mcpRequest?: {
+    name: string;
+    arguments: Record<string, unknown>;
+  };
 }
 
 const FAILURE_BACKOFF_MS = 60 * 1000;
@@ -373,7 +385,7 @@ export default function mcpAdapter(pi: ExtensionAPI) {
             },
           }
         : {}),
-      async execute(_toolCallId, params) {
+      async execute(_toolCallId, params, _signal, _onUpdate, _ctx): Promise<AgentToolResult<DirectToolResultDetails>> {
         if (!state && initPromise) {
           try { state = await initPromise; } catch {
             return {
@@ -386,6 +398,12 @@ export default function mcpAdapter(pi: ExtensionAPI) {
           return {
             content: [{ type: "text" as const, text: "MCP not initialized" }],
             details: { error: "not_initialized" },
+          };
+        }
+        if (state.runtimeIssue) {
+          return {
+            content: [{ type: "text" as const, text: state.runtimeIssue }],
+            details: { error: "runtime_unavailable" },
           };
         }
 
@@ -517,6 +535,10 @@ export default function mcpAdapter(pi: ExtensionAPI) {
       }
       if (!state) {
         if (ctx.hasUI) ctx.ui.notify("MCP not initialized", "error");
+        return;
+      }
+      if (state.runtimeIssue) {
+        if (ctx.hasUI) ctx.ui.notify(state.runtimeIssue, "warning");
         return;
       }
 
@@ -722,6 +744,12 @@ export default function mcpAdapter(pi: ExtensionAPI) {
         return {
           content: [{ type: "text", text: "MCP not initialized" }],
           details: { error: "not_initialized" },
+        };
+      }
+      if (state.runtimeIssue) {
+        return {
+          content: [{ type: "text", text: state.runtimeIssue }],
+          details: { error: "runtime_unavailable" },
         };
       }
       
@@ -1362,6 +1390,17 @@ async function initializeMcp(
   const failureTracker = new Map<string, number>();
   const ui = ctx.hasUI ? ctx.ui : undefined;
   const state: McpExtensionState = { manager, lifecycle, toolMetadata, config, failureTracker, ui };
+
+  const sdkAvailable = await hasMcpSdk();
+  if (!sdkAvailable) {
+    state.runtimeIssue = getMcpSdkMissingMessage();
+    if (ui) {
+      ui.setStatus("mcp", ui.theme.fg("warning", "MCP: disabled (missing SDK)"));
+      ui.notify(state.runtimeIssue, "warning");
+    }
+    logWarn(state.runtimeIssue);
+    return state;
+  }
   
   const serverEntries = Object.entries(config.mcpServers);
   if (serverEntries.length === 0) {
@@ -1629,6 +1668,10 @@ function totalToolCount(state: McpExtensionState): number {
 function updateStatusBar(state: McpExtensionState): void {
   const ui = state.ui;
   if (!ui) return;
+  if (state.runtimeIssue) {
+    ui.setStatus("mcp", ui.theme.fg("warning", "MCP: disabled (missing SDK)"));
+    return;
+  }
   const total = Object.keys(state.config.mcpServers).length;
   if (total === 0) {
     ui.setStatus("mcp", "");
@@ -1795,7 +1838,7 @@ async function openMcpPanel(
   const { createMcpPanel } = await import("./mcp-panel.js");
 
   return new Promise<void>((resolve) => {
-    ctx.ui.custom(
+    ctx.ui.custom<void>(
       (tui, _theme, _keybindings, done) => {
         return createMcpPanel(config, cache, provenanceMap, callbacks, tui, (result: McpPanelResult) => {
           if (!result.cancelled) {
@@ -1823,7 +1866,7 @@ async function openMcpPanel(
               ctx.ui.notify("Direct tools updated. Restart pi to apply.", "info");
             }
           }
-          done();
+          done(undefined);
           resolve();
         });
       },
