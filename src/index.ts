@@ -1,7 +1,7 @@
 // index.ts - Full extension entry point with commands
 import { keyHint, type AgentToolResult, type ExtensionAPI, type ExtensionContext, type ToolInfo } from "@mariozechner/pi-coding-agent";
 import { Text } from "@mariozechner/pi-tui";
-import { Type } from "@sinclair/typebox";
+import { Type } from "typebox";
 import { existsSync } from "node:fs";
 import { loadMcpConfig, getServerProvenance, writeDirectToolsConfig, writeServerConfigChanges } from "./config.js";
 import { formatToolName, getServerPrefix, type McpConfig, type McpContent, type ToolMetadata, type McpTool, type McpResource, type ServerEntry, type DirectToolSpec, type McpPanelCallbacks, type McpPanelResult } from "./types.js";
