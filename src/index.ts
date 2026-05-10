@@ -1,6 +1,6 @@
 // index.ts - Full extension entry point with commands
-import { keyHint, type AgentToolResult, type ExtensionAPI, type ExtensionContext, type ToolInfo } from "@mariozechner/pi-coding-agent";
-import { Text } from "@mariozechner/pi-tui";
+import { keyHint, type AgentToolResult, type ExtensionAPI, type ExtensionContext, type ToolInfo } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { existsSync } from "node:fs";
 import { loadMcpConfig, getServerProvenance, writeDirectToolsConfig, writeServerConfigChanges } from "./config.js";
@@ -309,7 +309,7 @@ export default function mcpAdapter(pi: ExtensionAPI) {
       );
 
   for (const spec of directSpecs) {
-    pi.registerTool({
+    (pi.registerTool as (definition: any) => void)({
       name: spec.prefixedName,
       label: `MCP: ${spec.originalName}`,
       description: spec.description || "(no description)",
@@ -552,7 +552,7 @@ export default function mcpAdapter(pi: ExtensionAPI) {
   });
   
   // Single unified MCP tool - mode determined by parameters
-  pi.registerTool({
+  (pi.registerTool as (definition: any) => void)({
     name: "mcp",
     label: "MCP",
     description: buildProxyDescription(earlyConfig, earlyCache, directSpecs),

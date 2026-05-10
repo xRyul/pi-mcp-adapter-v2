@@ -44,9 +44,9 @@
     "zod": "^3.25.0 || ^4.0.0"
   },
   "devDependencies": {
-    "@mariozechner/pi-ai": "0.67.5",
-    "@mariozechner/pi-coding-agent": "0.67.5",
-    "@mariozechner/pi-tui": "0.67.5",
+    "@earendil-works/pi-ai": "0.74.0",
+    "@earendil-works/pi-coding-agent": "0.74.0",
+    "@earendil-works/pi-tui": "0.74.0",
     "@types/node": "^24.12.2",
     "typescript": "^5.9.3",
     "zod": "^3.25.0"

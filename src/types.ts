@@ -1,5 +1,5 @@
 // types.ts - Core type definitions
-import type { TextContent, ImageContent } from "@mariozechner/pi-ai";
+import type { TextContent, ImageContent } from "@earendil-works/pi-ai";
 
 // Runtime transport handle used by the adapter.
 export interface Transport {

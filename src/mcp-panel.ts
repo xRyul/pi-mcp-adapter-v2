@@ -1,4 +1,4 @@
-import { matchesKey, truncateToWidth, visibleWidth, Editor, type EditorTheme, type TUI } from "@mariozechner/pi-tui";
+import { matchesKey, truncateToWidth, visibleWidth, Editor, type EditorTheme, type TUI } from "@earendil-works/pi-tui";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
