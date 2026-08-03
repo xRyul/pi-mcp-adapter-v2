@@ -1,4 +1,4 @@
-import { matchesKey, truncateToWidth, visibleWidth, Editor, type EditorTheme, type TUI } from "@earendil-works/pi-tui";
+import { CURSOR_MARKER, Editor, matchesKey, truncateToWidth, visibleWidth, type EditorTheme, type Focusable, type TUI } from "@earendil-works/pi-tui";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -108,7 +108,7 @@ interface VisibleItem {
   toolIndex?: number;
 }
 
-class McpPanel {
+class McpPanel implements Focusable {
   private servers: ServerState[] = [];
   private cursorIndex = 0;
   private nameQuery = "";
@@ -150,6 +150,16 @@ class McpPanel {
   private visibleItems: VisibleItem[] = [];
   private tui: TUI;
   private t = DEFAULT_THEME;
+  private _focused = false;
+
+  get focused(): boolean {
+    return this._focused;
+  }
+
+  set focused(value: boolean) {
+    this._focused = value;
+    if (this.serverEditor) this.serverEditor.focused = value;
+  }
 
   private static readonly MAX_VISIBLE = 12;
   private static readonly INACTIVITY_MS = 60_000;
@@ -593,6 +603,7 @@ class McpPanel {
     const editor = new Editor(this.tui, this.createServerEditorTheme(), { paddingX: 0 });
     editor.disableSubmit = true;
     editor.setText(template);
+    editor.focused = this._focused;
     this.serverEditor = editor;
     this.serverEditorInitialText = template;
     this.view = "server-editor";
@@ -639,6 +650,7 @@ class McpPanel {
     const editor = new Editor(this.tui, this.createServerEditorTheme(), { paddingX: 0 });
     editor.disableSubmit = true;
     editor.setText(template);
+    editor.focused = this._focused;
     this.serverEditor = editor;
     this.serverEditorInitialText = template;
     this.view = "server-editor";
@@ -1530,7 +1542,7 @@ class McpPanel {
 
     lines.push(emptyRow());
 
-    const cursor = fg(t.selected, "│");
+    const cursor = `${this.focused ? CURSOR_MARKER : ""}${fg(t.selected, "│")}`;
     const searchIcon = fg(t.border, "◎");
     if (this.descSearchActive) {
       lines.push(row(`${searchIcon}  ${fg(t.needsAuth, "desc:")} ${this.descQuery}${cursor}`));

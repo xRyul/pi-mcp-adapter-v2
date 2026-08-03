@@ -524,6 +524,13 @@ export default function mcpAdapter(pi: ExtensionAPI) {
   pi.registerCommand("mcp", {
     description: "Open MCP panel",
     handler: async (_args, ctx) => {
+      if (ctx.mode !== "tui") {
+        const message = "MCP: /mcp is only available in TUI mode.";
+        logWarn(message);
+        if (ctx.hasUI) ctx.ui.notify(message, "warning");
+        return;
+      }
+
       // Wait for init if still in progress
       if (!state && initPromise) {
         try {
@@ -539,11 +546,6 @@ export default function mcpAdapter(pi: ExtensionAPI) {
       }
       if (state.runtimeIssue) {
         if (ctx.hasUI) ctx.ui.notify(state.runtimeIssue, "warning");
-        return;
-      }
-
-      if (!ctx.hasUI) {
-        logWarn("MCP: UI not available; /mcp opens an interactive panel.");
         return;
       }
 
@@ -1837,42 +1839,39 @@ async function openMcpPanel(
 
   const { createMcpPanel } = await import("./mcp-panel.js");
 
-  return new Promise<void>((resolve) => {
-    ctx.ui.custom<void>(
-      (tui, _theme, _keybindings, done) => {
-        return createMcpPanel(config, cache, provenanceMap, callbacks, tui, (result: McpPanelResult) => {
-          if (!result.cancelled) {
-            const configPath = (pi.getFlag("mcp-config") as string | undefined) ?? configOverridePath;
+  await ctx.ui.custom<void>(
+    (tui, _theme, _keybindings, done) => {
+      return createMcpPanel(config, cache, provenanceMap, callbacks, tui, (result: McpPanelResult) => {
+        if (!result.cancelled) {
+          const configPath = (pi.getFlag("mcp-config") as string | undefined) ?? configOverridePath;
 
-            if (result.serverChanges.size > 0) {
-              // Apply to in-memory config immediately so subsequent operations see updated definitions
-              for (const [name, def] of result.serverChanges) {
-                if (def === null) delete config.mcpServers[name];
-                else config.mcpServers[name] = def;
-              }
-
-              writeServerConfigChanges(result.serverChanges, configPath);
-
-              // Hot-apply: update runtime state so new/updated servers are immediately usable via mcp({ ... })
-              void applyServerChangesToRuntime(state, result.serverChanges).catch((err) => {
-                logError("MCP: failed to hot-apply server changes", err);
-              });
-
-              ctx.ui.notify("MCP servers updated.", "info");
+          if (result.serverChanges.size > 0) {
+            // Apply to in-memory config immediately so subsequent operations see updated definitions
+            for (const [name, def] of result.serverChanges) {
+              if (def === null) delete config.mcpServers[name];
+              else config.mcpServers[name] = def;
             }
 
-            if (result.directToolChanges.size > 0) {
-              writeDirectToolsConfig(result.directToolChanges, provenanceMap, config);
-              ctx.ui.notify("Direct tools updated. Restart pi to apply.", "info");
-            }
+            writeServerConfigChanges(result.serverChanges, configPath);
+
+            // Hot-apply: update runtime state so new/updated servers are immediately usable via mcp({ ... })
+            void applyServerChangesToRuntime(state, result.serverChanges).catch((err) => {
+              logError("MCP: failed to hot-apply server changes", err);
+            });
+
+            ctx.ui.notify("MCP servers updated.", "info");
           }
-          done(undefined);
-          resolve();
-        });
-      },
-      { overlay: true, overlayOptions: { anchor: "center", width: 82 } },
-    );
-  });
+
+          if (result.directToolChanges.size > 0) {
+            writeDirectToolsConfig(result.directToolChanges, provenanceMap, config);
+            ctx.ui.notify("Direct tools updated. Restart pi to apply.", "info");
+          }
+        }
+        done(undefined);
+      });
+    },
+    { overlay: true, overlayOptions: { anchor: "center", width: 82 } },
+  );
 }
 
 /**
