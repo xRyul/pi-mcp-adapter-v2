@@ -7,14 +7,7 @@
 
   | Before | After |
   | --- | --- |
-  | <img width="450" alt="Before: collapsed MCP call still shows output" src="https://github.com/xRyul/pi-mcp-adapter-v2/releases/download/v2.4.6/mcp-before-v2.4.5.png" /> | <img width="450" alt="After: collapsed MCP call shows only its header" src="https://github.com/xRyul/pi-mcp-adapter-v2/releases/download/v2.4.6/mcp-after-v2.4.6.png" /> |
-
-  <details>
-  <summary>Full output (Ctrl+O)</summary>
-
-  <img width="900" alt="Expanded MCP call showing server, tool, arguments, and full output" src="https://github.com/xRyul/pi-mcp-adapter-v2/releases/download/v2.4.6/mcp-expanded-v2.4.6.png" />
-
-  </details>
+  | <img width="450" alt="Before: collapsed MCP call still shows output" src="https://github.com/xRyul/pi-mcp-adapter-v2/releases/download/v2.4.6/mcp-before-v2.4.5.png" /> | <img width="450" alt="After: collapsed MCP call shows only its header" src="https://github.com/xRyul/pi-mcp-adapter-v2/releases/download/v2.4.6/mcp-after-v2.4.6.png" /><details><summary>Full output (Ctrl+O)</summary><img width="450" alt="Expanded MCP call showing server, tool, arguments, and full output" src="https://github.com/xRyul/pi-mcp-adapter-v2/releases/download/v2.4.6/mcp-expanded-v2.4.6.png" /></details> |
 
 - Cell rendering e.g.: thoughts of Sequential Thinking MCP
 - All in Single Modal via `/mcp` 
