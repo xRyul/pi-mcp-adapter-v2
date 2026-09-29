@@ -1,5 +1,5 @@
 // index.ts - Full extension entry point with commands
-import { keyHint, type AgentToolResult, type ExtensionAPI, type ExtensionContext, type ToolInfo } from "@earendil-works/pi-coding-agent";
+import type { AgentToolResult, ExtensionAPI, ExtensionContext, Theme, ToolInfo, ToolRenderResultOptions } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { existsSync } from "node:fs";
@@ -108,16 +108,6 @@ function extractImageBlocks(content: unknown): any[] {
   return content.filter((c: any) => c && c.type === "image");
 }
 
-function formatImageCount(n: number): string {
-  return n + " image" + (n === 1 ? "" : "s");
-}
-
-function truncateTextLines(text: string, maxLines: number): { text: string; remaining: number } {
-  const lines = text.split("\n");
-  if (lines.length <= maxLines) return { text, remaining: 0 };
-  return { text: lines.slice(0, maxLines).join("\n"), remaining: lines.length - maxLines };
-}
-
 function fgLines(theme: any, color: string, text: string): string {
   return text.split("\n").map(line => theme.fg(color, line)).join("\n");
 }
@@ -125,6 +115,76 @@ function fgLines(theme: any, color: string, text: string): string {
 function isSequentialThinkingToolName(name: unknown): boolean {
   if (typeof name !== "string") return false;
   return name === "sequentialthinking" || name === "sequential_thinking";
+}
+
+function renderMcpResult(
+  result: any,
+  { expanded, isPartial }: ToolRenderResultOptions,
+  theme: Theme,
+  context?: { isError?: boolean },
+) {
+  if (isPartial) {
+    return new Text(theme.fg("warning", "MCP: working..."), 0, 0);
+  }
+
+  const details = result?.details ?? {};
+  if (!expanded && !context?.isError && !result?.isError && !details.error) {
+    return new Text("", 0, 0);
+  }
+
+  const outputText = extractTextBlocks(result?.content);
+  if (!expanded) {
+    const message = outputText.split("\n")[0] || String(details.error ?? "MCP tool failed");
+    return new Text(theme.fg("error", message), 0, 0);
+  }
+
+  const imageBlocks = extractImageBlocks(result?.content);
+  const isCall = details.mode === "call" || !!details.mcpRequest || !!details.resourceUri;
+  const sections: string[] = [];
+  if (isCall) {
+    const tool = details.tool ?? details.mcpRequest?.name;
+    const reqArgs = details.mcpRequest?.arguments;
+    if (details.server) sections.push(theme.fg("muted", "Server: ") + theme.fg("accent", details.server));
+    if (tool) sections.push(theme.fg("muted", "Tool: ") + theme.fg("accent", tool));
+
+    if (isSequentialThinkingToolName(tool) && typeof reqArgs?.thought === "string") {
+      const thoughtNum = reqArgs.thoughtNumber ?? "?";
+      const totalThoughts = reqArgs.totalThoughts ?? "?";
+      const contextBits: string[] = [];
+      if (reqArgs.isRevision) contextBits.push(`revision of ${reqArgs.revisesThought ?? "?"}`);
+      if (reqArgs.branchFromThought) {
+        contextBits.push(`branch from ${reqArgs.branchFromThought}${reqArgs.branchId ? ` (${reqArgs.branchId})` : ""}`);
+      }
+      const header = `Thought ${thoughtNum}/${totalThoughts}${contextBits.length ? ` (${contextBits.join(", ")})` : ""}`;
+      sections.push(theme.fg("toolTitle", theme.bold(header)));
+      sections.push(fgLines(theme, "toolOutput", reqArgs.thought));
+    }
+
+    if (reqArgs && typeof reqArgs === "object") {
+      const argsForJson = isSequentialThinkingToolName(tool) && typeof reqArgs.thought === "string"
+        ? { ...reqArgs, thought: undefined }
+        : reqArgs;
+      sections.push(theme.fg("muted", "Arguments:"));
+      sections.push(fgLines(theme, "toolOutput", safeJsonStringify(argsForJson)));
+    }
+  }
+
+  if (outputText) {
+    if (isCall) sections.push(theme.fg("muted", "Output:"));
+    sections.push(fgLines(theme, "toolOutput", outputText));
+  } else if (imageBlocks.length === 0) {
+    sections.push(theme.fg("muted", "(empty result)"));
+  }
+
+  if (imageBlocks.length > 0) {
+    sections.push(theme.fg("muted", "Images:"));
+    const lines = imageBlocks
+      .map((img: any, i: number) => (i + 1) + ". " + (img.mimeType ?? "image/*"))
+      .join("\n");
+    sections.push(fgLines(theme, "toolOutput", lines));
+  }
+
+  return new Text(sections.join("\n\n"), 0, 0);
 }
 
 const BUILTIN_NAMES = new Set(["read", "bash", "edit", "write", "grep", "find", "ls", "mcp"]);
@@ -314,77 +374,7 @@ export default function mcpAdapter(pi: ExtensionAPI) {
       label: `MCP: ${spec.originalName}`,
       description: spec.description || "(no description)",
       parameters: Type.Unsafe<Record<string, unknown>>(spec.inputSchema || { type: "object", properties: {} }),
-      ...(isSequentialThinkingToolName(spec.originalName)
-        ? {
-            renderResult(result: any, { expanded, isPartial }: { expanded: boolean; isPartial: boolean }, theme: any) {
-              if (isPartial) {
-                return new Text(theme.fg("warning", "Processing..."), 0, 0);
-              }
-
-              const details: any = result?.details ?? {};
-              const content = result?.content;
-              const outputText = extractTextBlocks(content);
-              const imageBlocks = extractImageBlocks(content);
-              const reqArgs = details.mcpRequest?.arguments as any;
-              const thought = reqArgs?.thought;
-
-              if (expanded && typeof thought === "string") {
-                const thoughtNum = reqArgs?.thoughtNumber ?? "?";
-                const totalThoughts = reqArgs?.totalThoughts ?? "?";
-                const sections: string[] = [];
-                sections.push(theme.fg("toolTitle", theme.bold(`Thought ${thoughtNum}/${totalThoughts}`)));
-                sections.push(fgLines(theme, "toolOutput", thought));
-
-                if (outputText) {
-                  sections.push(theme.fg("muted", "Output:"));
-                  sections.push(fgLines(theme, "toolOutput", outputText));
-                }
-
-                if (imageBlocks.length > 0) {
-                  sections.push(theme.fg("muted", "Images:"));
-                  const lines = imageBlocks
-                    .map((img: any, i: number) => (i + 1) + ". " + (img.mimeType ?? "image/*"))
-                    .join("\n");
-                  sections.push(fgLines(theme, "toolOutput", lines));
-                }
-
-                return new Text(sections.join("\n\n"), 0, 0);
-              }
-
-              if (!outputText) {
-                // Some tools return only images. Avoid showing "(empty result)" in that case.
-                if (imageBlocks.length > 0) {
-                  let text = theme.fg("muted", "(" + formatImageCount(imageBlocks.length) + ")");
-                  if (typeof thought === "string") {
-                    text += "\n" + theme.fg("muted", "(") + keyHint("app.tools.expand", "to view thought") + theme.fg("muted", ")");
-                  }
-                  return new Text(text, 0, 0);
-                }
-
-                if (typeof thought === "string") {
-                  return new Text(theme.fg("muted", "(") + keyHint("app.tools.expand", "to view thought") + theme.fg("muted", ")"), 0, 0);
-                }
-
-                return new Text(theme.fg("muted", "(empty result)"), 0, 0);
-              }
-
-              if (expanded) {
-                return new Text(fgLines(theme, "toolOutput", outputText), 0, 0);
-              }
-
-              const { text: truncated, remaining } = truncateTextLines(outputText, 12);
-              let text = fgLines(theme, "toolOutput", truncated);
-
-              if (remaining > 0) {
-                text += "\n" + theme.fg("muted", `... (${remaining} more lines, `) + keyHint("app.tools.expand", "to expand") + theme.fg("muted", ")");
-              } else {
-                text += "\n" + theme.fg("muted", "(") + keyHint("app.tools.expand", "to view thought") + theme.fg("muted", ")");
-              }
-
-              return new Text(text, 0, 0);
-            },
-          }
-        : {}),
+      renderResult: renderMcpResult,
       async execute(_toolCallId, params, _signal, _onUpdate, _ctx): Promise<AgentToolResult<DirectToolResultDetails>> {
         if (!state && initPromise) {
           try { state = await initPromise; } catch {
@@ -583,107 +573,7 @@ export default function mcpAdapter(pi: ExtensionAPI) {
       return new Text(text, 0, 0);
     },
 
-    renderResult(result: any, { expanded, isPartial }: { expanded: boolean; isPartial: boolean }, theme: any) {
-      if (isPartial) {
-        return new Text(theme.fg("warning", "MCP: working..."), 0, 0);
-      }
-
-      const details: any = result?.details ?? {};
-      const mode: string | undefined = details.mode;
-      const content = result?.content;
-      const outputText = extractTextBlocks(content);
-      const imageBlocks = extractImageBlocks(content);
-      const isSequentialThinking = isSequentialThinkingToolName(details.tool) || isSequentialThinkingToolName(details.mcpRequest?.name);
-
-      if (expanded && mode === "call") {
-        const server = details.server as string | undefined;
-        const tool = (details.tool ?? details.mcpRequest?.name) as string | undefined;
-        const reqArgs = details.mcpRequest?.arguments as any;
-
-        const sections: string[] = [];
-        if (server) sections.push(theme.fg("muted", "Server: ") + theme.fg("accent", server));
-        if (tool) sections.push(theme.fg("muted", "Tool: ") + theme.fg("accent", tool));
-
-        if (isSequentialThinkingToolName(tool) && reqArgs && typeof reqArgs.thought === "string") {
-          const thoughtNum = reqArgs.thoughtNumber ?? "?";
-          const totalThoughts = reqArgs.totalThoughts ?? "?";
-          const contextBits: string[] = [];
-          if (reqArgs.isRevision) contextBits.push(`revision of ${reqArgs.revisesThought ?? "?"}`);
-          if (reqArgs.branchFromThought) {
-            contextBits.push(`branch from ${reqArgs.branchFromThought}${reqArgs.branchId ? ` (${reqArgs.branchId})` : ""}`);
-          }
-          const header = `Thought ${thoughtNum}/${totalThoughts}${contextBits.length ? ` (${contextBits.join(", ")})` : ""}`;
-          sections.push(theme.fg("toolTitle", theme.bold(header)));
-          sections.push(fgLines(theme, "toolOutput", reqArgs.thought));
-        }
-
-        if (reqArgs && typeof reqArgs === "object") {
-          const argsForJson = (isSequentialThinkingToolName(tool) && typeof reqArgs.thought === "string")
-            ? { ...reqArgs, thought: undefined }
-            : reqArgs;
-          sections.push(theme.fg("muted", "Arguments:"));
-          sections.push(fgLines(theme, "toolOutput", safeJsonStringify(argsForJson)));
-        }
-
-        if (outputText) {
-          sections.push(theme.fg("muted", "Output:"));
-          sections.push(fgLines(theme, "toolOutput", outputText));
-        } else if (imageBlocks.length === 0) {
-          sections.push(theme.fg("muted", "(empty result)"));
-        }
-
-        if (imageBlocks.length > 0) {
-          sections.push(theme.fg("muted", "Images:"));
-          const lines = imageBlocks
-            .map((img: any, i: number) => (i + 1) + ". " + (img.mimeType ?? "image/*"))
-            .join("\n");
-          sections.push(fgLines(theme, "toolOutput", lines));
-        }
-
-        return new Text(sections.join("\n\n"), 0, 0);
-      }
-
-      if (!outputText) {
-        if (imageBlocks.length > 0) {
-          if (expanded) {
-            const sections: string[] = [];
-            sections.push(theme.fg("muted", "Images:"));
-            const lines = imageBlocks
-              .map((img: any, i: number) => (i + 1) + ". " + (img.mimeType ?? "image/*"))
-              .join("\n");
-            sections.push(fgLines(theme, "toolOutput", lines));
-            return new Text(sections.join("\n"), 0, 0);
-          }
-
-          let text = theme.fg("muted", "(" + formatImageCount(imageBlocks.length) + ")");
-          if (mode === "call" && isSequentialThinking) {
-            text += "\n" + theme.fg("muted", "(") + keyHint("app.tools.expand", "to view thought") + theme.fg("muted", ")");
-          }
-          return new Text(text, 0, 0);
-        }
-
-        if (mode === "call" && isSequentialThinking) {
-          return new Text(theme.fg("muted", "(") + keyHint("app.tools.expand", "to view thought") + theme.fg("muted", ")"), 0, 0);
-        }
-
-        return new Text(theme.fg("muted", "(empty result)"), 0, 0);
-      }
-
-      if (expanded) {
-        return new Text(fgLines(theme, "toolOutput", outputText), 0, 0);
-      }
-
-      const { text: truncated, remaining } = truncateTextLines(outputText, 12);
-      let text = fgLines(theme, "toolOutput", truncated);
-
-      if (remaining > 0) {
-        text += "\n" + theme.fg("muted", `... (${remaining} more lines, `) + keyHint("app.tools.expand", "to expand") + theme.fg("muted", ")");
-      } else if (mode === "call" && isSequentialThinking) {
-        text += "\n" + theme.fg("muted", "(") + keyHint("app.tools.expand", "to view thought") + theme.fg("muted", ")");
-      }
-
-      return new Text(text, 0, 0);
-    },
+    renderResult: renderMcpResult,
 
     parameters: Type.Object({
       // Call mode
