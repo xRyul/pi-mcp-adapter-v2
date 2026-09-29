@@ -137,9 +137,10 @@ export class McpServerManager {
     if (definition.command) {
       let command = definition.command;
       let args = definition.args ?? [];
+      const env = resolveEnv(definition.env);
 
       if (command === "npx" || command === "npm") {
-        const resolved = await resolveNpxBinary(command, args);
+        const resolved = await resolveNpxBinary(command, args, { cwd: definition.cwd, env });
         if (resolved) {
           command = resolved.isJs ? "node" : resolved.binPath;
           args = resolved.isJs ? [resolved.binPath, ...resolved.extraArgs] : resolved.extraArgs;
@@ -150,7 +151,7 @@ export class McpServerManager {
       transport = new sdk.StdioClientTransport({
         command,
         args,
-        env: resolveEnv(definition.env),
+        env,
         cwd: definition.cwd,
         stderr: definition.debug ? "inherit" : "ignore",
       });
