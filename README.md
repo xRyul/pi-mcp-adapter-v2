@@ -3,6 +3,12 @@
 
 ## What's different
 
+- Collapsed MCP output: successful results stay hidden; **Ctrl+O** expands them. Errors remain visible.
+
+  | Before (v2.4.5) | After (v2.4.6) |
+  | --- | --- |
+  | <img width="450" alt="Before: collapsed MCP call still shows output" src="https://github.com/xRyul/pi-mcp-adapter-v2/releases/download/v2.4.6/mcp-before-v2.4.5.png" /> | <img width="450" alt="After: collapsed MCP call shows only its header" src="https://github.com/xRyul/pi-mcp-adapter-v2/releases/download/v2.4.6/mcp-after-v2.4.6.png" /> |
+
 - Cell rendering e.g.: thoughts of Sequential Thinking MCP
 - All in Single Modal via `/mcp` 
 	- Add/edit/remove MCP servers directly from the modal (modifies global config: `~/.pi/agent/mcp.json`) e.g.:
