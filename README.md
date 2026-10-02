@@ -1,4 +1,7 @@
 # Pi MCP Adapter v2
+
+> **Deprecated and no longer maintained.** Pi now has native MCP support via `/mcp`. Use Pi's built-in support instead of this extension.
+
 > Fork of https://github.com/nicobailon/pi-mcp-adapter (original by Nico Bailon).
 
 ## What's different
